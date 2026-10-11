@@ -9,9 +9,9 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
-  # 发 Release 才需要 write
-  id-token: write
+  # 需要 write：推 v* tag 时 softprops/action-gh-release 要写 Release。
+  # 只读会导致发布步骤 403。
+  contents: write
 
 jobs:
   build:
@@ -66,4 +66,5 @@ jobs:
         with:
           files: build/thermald-v*.zip
           generate_release_notes: true
-          fail_on_unmatched_files: false
+          # true：zip 没匹配上就让 Release 步骤失败，而不是静默发一个空 Release。
+          fail_on_unmatched_files: true
