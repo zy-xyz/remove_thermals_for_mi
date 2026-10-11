@@ -1,0 +1,6 @@
+id=thermald
+name=thermald 充电温控
+version=0.1.0
+versionCode=100
+author=zy
+description=小米/红米充电温控：IMC-ADRC 闭环限流把电池温度压在设定点（默认 47℃）。支持 WebUI 实时调参，配置热加载，停机自动清理充电电流。

@@ -1,0 +1,17 @@
+[package]
+name = "thermald"
+version = "0.1.0"
+edition = "2021"
+description = "IMC-ADRC charging thermal control daemon for Xiaomi/Redmi (KernelSU module)"
+license = "MIT"
+
+[lib]
+name = "thermald"
+path = "src/lib.rs"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true

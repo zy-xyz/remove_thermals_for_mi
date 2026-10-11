@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>小米温控调节</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <h1>小米温控调节</h1>
+  <div id="banner" class="hidden"></div>
+</header>
+
+<main>
+  <section class="cards">
+    <div class="card"><label>当前温度</label><div id="c-temp" class="val">--</div><div id="c-temp-sub" class="sub">--</div></div>
+    <div class="card"><label>实际充电电流</label><div id="c-cur" class="val">--</div><div id="c-cur-sub" class="sub">--</div></div>
+    <div class="card"><label>目标温度</label><div id="c-target" class="val">--</div><div id="c-target-sub" class="sub">--</div></div>
+    <div class="card"><label>保护状态</label><div id="c-prot" class="val">--</div><div id="c-prot-sub" class="sub">--</div></div>
+    <div class="card"><label>运行时长</label><div id="c-uptime" class="val">--</div><div id="c-uptime-sub" class="sub">--</div></div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head">
+      <h2>温度 / 电流曲线</h2>
+      <div class="tools">
+        <span class="legend"><i class="dot temp"></i>温度 ℃<i class="dot cur"></i>电流 A</span>
+        <button id="btn-pause" type="button">暂停</button>
+      </div>
+    </div>
+    <div id="chart-wrap">
+      <canvas id="chart" width="720" height="300"></canvas>
+      <div id="chart-msg" class="chart-msg hidden"></div>
+    </div>
+    <div id="chart-meta" class="meta">--</div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-head"><h2>参数调节</h2></div>
+    <p class="hint">范围与单位依据 CONTRACT.md §3；越界 / 非数字 / 上限小于下限会在发起调用前拦截。</p>
+    <form id="form-params"></form>
+    <div class="actions">
+      <button id="btn-save" class="primary" type="button">保存</button>
+      <button id="btn-reload" type="button">从设备重读</button>
+      <button id="btn-reset" type="button" class="danger">恢复出厂</button>
+      <button id="btn-export" type="button">导出 JSON</button>
+    </div>
+    <div id="form-msg" class="msg hidden"></div>
+    <pre id="export-out" class="hidden"></pre>
+  </section>
+</main>
+
+<script src="app.js"></script>
+</body>
+</html>

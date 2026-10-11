@@ -1,0 +1,31 @@
+# SELinux 策略补丁（KernelSU 在 post-fs-data 阶段加载，每行一条策略语句）
+# 语法 = magiskpolicy 策略语言。运行本模块脚本与二进制的域是 u:r:ksu:s0。
+#
+# 【设备相关假设，上机前需复核】本文件按 AOSP 常见标签书写：
+#   /sys/class/power_supply/**            → sysfs_batteryinfo
+#   /data/adb/modules/**                  → ksu_file
+# 部分厂商内核给 constant_charge_current 打了不同的标签；若守护进程报权限错误，
+# 用 `ls -Z /sys/class/power_supply/battery/*` 查真实上下文，替换下面的类型名即可。
+
+# ── 1. 电源 sysfs 目录：允许进入 /sys/class/power_supply/battery/ ──
+allow ksu sysfs_batteryinfo:dir { search read open getattr }
+
+# ── 2. 读电池温度 /sys/class/power_supply/battery/temp（闭环反馈量）──
+allow ksu sysfs_batteryinfo:file { read open getattr }
+
+# ── 3. 读充电状态 status、写充电电流 constant_charge_current（控制输出）──
+allow ksu sysfs_batteryinfo:file { write append }
+
+# ── 4. 模块二进制执行权限：exec /data/adb/modules/thermald/bin/thermald ──
+# execute = 允许执行；execute_no_trans = 不要求域切换（留在 ksu 域内运行）
+allow ksu ksu_file:file { read open getattr execute execute_no_trans map }
+
+# ── 5. 模块目录遍历权限（进入 bin/ 找到二进制）──
+allow ksu ksu_file:dir { search read open getattr }
+
+# ── 6. 兼容：从 root shell（su 域）手工执行 CLI / WebUI 调 ksu.exec 的场景 ──
+# WebUI 保存参数走 thermald set，若以 su 域拉起，需要同等的 sysfs 权限。
+allow su sysfs_batteryinfo:dir { search read open getattr }
+allow su sysfs_batteryinfo:file { read write open getattr append }
+allow su ksu_file:file { read open getattr execute execute_no_trans map }
+allow su ksu_file:dir { search read open getattr }
