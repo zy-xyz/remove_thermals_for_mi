@@ -32,9 +32,15 @@
 //! 标称一致时 `predictor_delayed == y`，于是 `y_corrected == predictor`——控制器看到的
 //! 是不含滞后的输出；模型失配时残差交由 ESO 的 `z2` 吸收。
 //!
-//! # 限幅污染
-//! 喂给 ESO 的 `b0·u` 必须是**实际施加**的电流（限幅之后），否则观测器会按一个
-//! 从未发生过的控制量推算状态，`z2` 被系统性污染 → 积分风卷。
+//! # 输入污染：喂给 ESO 的必须是**实际**电流
+//! 喂给 ESO 的 `b0·u` 必须是电池**真正吸入**的电流，否则观测器会按一个从未发生过的
+//! 输入推算状态，`z2` 被系统性污染 → 积分风卷。两层含义：
+//!
+//! 1. **限幅之后**：不能用限幅前的原始控制量。
+//! 2. **实测而非设定**：写入 `constant_charge_current` 的是电流上限，电池实际电流
+//!    （`current_now`）随电压/电量上升会低于设定值（CV 阶段尤其明显）。故真机应走
+//!    [`ImcAdrc::step_with_meas`] 把实测电流喂进来；[`ImcAdrc::step`] 假设设定即实测，
+//!    只适用于仿真与设定确实被执行的情形。
 
 use crate::model::{DelayLine, Params, Plant, PlantModel};
 
@@ -86,11 +92,25 @@ impl ImcAdrc {
 
     /// 推进一个采样步：给定测量温度 `y` 与设定点 `r`，返回本步要施加的电流（A）。
     ///
-    /// # 采样周期约束
-    /// ESO 与对象预估器都用前向 Euler。两者稳定要求 `ωo·dt < 2`（`ωo` 远大于 `1/T` 时
-    /// 前者主导）。默认 `ωo = 7.75/T ≈ 0.0431`（T=180s）下 `dt` 需 < 46s；守护进程固定
-    /// 1s 采样，余量充足。改变 `dt` 或 `wo` 时必须一并复核此条件。
+    /// ESO 与预估器默认按「上一拍实际施加的电流」推进——即假设设定即实测。
+    /// 真机上两者不一致（CV 阶段设定电流会高于电池实际吸入电流），应改用
+    /// [`Self::step_with_meas`] 把实测电流喂进来。
     pub fn step(&mut self, y: f64, r: f64, dt: f64) -> f64 {
+        self.step_with_meas(y, r, dt, self.u_applied)
+    }
+
+    /// 同 [`Self::step`]，但 ESO 与 Smith 预估器改用**实测电流** `u_meas` 推进。
+    ///
+    /// 为什么必须喂实测：写入 `constant_charge_current` 的是上限值，电池实际电流
+    /// （`current_now`）随电压/电量上升会低于设定值（CV 阶段尤其明显）。ESO 的
+    /// `b0·u` 与预估器的输入若继续用设定值，观测器会按一个从未发生的输入推算状态，
+    /// `z2` 被系统性污染 → 控制器误以为还在大力加热，温度斜率算错。喂实测后 z2
+    /// 只反映真正的未建模扰动，「温度升→减流、温度降→增流」由闭环自然给出。
+    ///
+    /// 时序约定：`u_meas` 应是**上一采样周期实际流过**的电流。daemon 每拍在
+    /// 计算新指令之前读 `current_now`（反映上一拍写入的后果），本轮积分窗口正好
+    /// 与之对应；读不到时传 `0.0`（宁可按无激励保守估计）。
+    pub fn step_with_meas(&mut self, y: f64, r: f64, dt: f64, u_meas: f64) -> f64 {
         let c = self.params.ctrl;
 
         // ① IMC 设定点整形：1/(λs+1)。
@@ -109,9 +129,9 @@ impl ImcAdrc {
         let yp_delayed = self.predictor_delay.push(yp);
         let y_corrected = y + (yp - yp_delayed);
 
-        // ③ 线性 ESO：β1 = 2ωo，β2 = ωo²。b0·u 用实际施加值。
+        // ③ 线性 ESO：β1 = 2ωo，β2 = ωo²。b0·u 必须用**实测**电流。
         let e = self.z1 - y_corrected;
-        let b0u = c.b0u(self.u_applied);
+        let b0u = c.b0u(u_meas);
         self.z1 += dt * (self.z2 - c.beta1() * e + b0u);
         self.z2 += dt * (-c.beta2() * e);
 
@@ -122,12 +142,8 @@ impl ImcAdrc {
         // ⑤ 限幅。执行器只有电流上下限这一个约束。
         let u = self.params.clamp_current(u_raw);
 
-        // ⑥ 预估器与实际施加值同步推进。
-        //
-        // 本模块**不实现硬保护**：硬件过温保护由充电驱动负责，本控制器只负责把温度压在
-        // 上限（`hardware_limit`，48℃）以下——这是靠闭环本身（设定点 47℃、上限 48℃ 留
-        // 1℃ 余量）做到的，不由「越限即断流」的旁路逻辑兜底。
-        self.predictor.step(u, dt);
+        // ⑥ 预估器按实测电流推进（名义对象收到的是实际激励）。
+        self.predictor.step(u_meas, dt);
         self.u_applied = u;
         u
     }
@@ -770,6 +786,65 @@ mod tests {
         // 失配下真温峰值仍须留在 48℃ 硬件上限之下——本模块没有保护兜底。
         let peak = r.y_true.iter().cloned().fold(f64::MIN, f64::max);
         assert!(peak < p.hardware_limit, "失配下真温峰值 {peak:.4}℃ 越 48℃ 硬件上限");
+    }
+
+    /// 场景③b：CV 尾部实际电流低于设定值（含饱和段与解除段）。
+    ///
+    /// 写入 `constant_charge_current` 的是上限；电池实际电流（`current_now`）随
+    /// 电压/电量上升而变小。这里用饱和上限模拟：前 300 步 `cap = 6A`（低于维持
+    /// 46.8℃ 所需的 `u_ss`，目标不可达），之后解除到 `2×u_ss`（可达）。
+    ///
+    /// 断言 `step_with_meas`（ESO/预估器吃实测 `u_actual = min(u, cap)`）：
+    /// 饱和段不因"以为还在大力加热"而积分风卷，输出有界、温度不越硬件上限、
+    /// 稳定在物理可达平衡点；解除段能恢复收敛到目标。
+    #[test]
+    fn suite_cv_saturation_recovers_with_measured() {
+        let p = Params::default();
+        let target = R0; // 46.8℃
+        let u_ss = (target - p.ambient) / p.model.k;
+        const SAT_STEPS: usize = 600;
+        const TOTAL: usize = 2400;
+        let cap_low = 6.0f64;        // < u_ss：饱和不可达
+        let cap_high = 2.0 * u_ss;   // 可达
+
+        let mut plant = Plant::with_temp(p.model, p.ambient, target, u_ss, DT);
+        let mut ctrl = ImcAdrc::new(&p, target, u_ss, DT);
+        let mut u_meas = u_ss;
+        let (mut us, mut ys) = (Vec::new(), Vec::new());
+        for i in 0..TOTAL {
+            let cap = if i < SAT_STEPS { cap_low } else { cap_high };
+            let u = ctrl.step_with_meas(plant.temp(), target, DT, u_meas);
+            let u_actual = u.min(cap);
+            let y = plant.step(u_actual, DT);
+            u_meas = u_actual;
+            us.push(u);
+            ys.push(y);
+        }
+
+        for (i, u) in us.iter().enumerate() {
+            assert!((p.current_min..=p.current_max).contains(u), "第 {i} 步输出 {u}A 越界");
+        }
+        assert!(us.iter().all(|u| u.is_finite()), "输出不得发散");
+
+        // 饱和段：温度朝可达平衡下降，全程不越 48℃ 硬件上限。
+        let peak = ys[..SAT_STEPS].iter().cloned().fold(f64::MIN, f64::max);
+        let eq_sat = p.ambient + p.model.k * cap_low;
+        eprintln!(
+            "[场景③b CV饱和] 饱和段峰值={peak:.4}℃ 段末={:.4}℃ 可达平衡={eq_sat:.4}℃",
+            ys[SAT_STEPS - 1]
+        );
+        assert!(peak < p.hardware_limit, "CV 饱和段峰值 {peak:.4}℃ 越 48℃ 硬件上限");
+        assert!(
+            ys[SAT_STEPS - 1] < target - 1.0,
+            "饱和段应明显降温（实际电流仅 {cap_low}A），段末 {:.4}℃",
+            ys[SAT_STEPS - 1]
+        );
+
+        // 解除段：恢复收敛到目标（污染没导致 stuck/风卷）。
+        let tail = &ys[ys.len() - 20..];
+        let err = tail.iter().map(|y| (y - target).abs()).fold(f64::MAX, f64::min);
+        eprintln!("[场景③b CV饱和] 解除后最近目标误差={err:.4}℃");
+        assert!(err < 0.1, "解除饱和后应收敛到目标 ±0.1℃ 内，实测 {err:.4}℃");
     }
 
     /// 场景③：外部扰动。+2℃ 瞬时热扰动后回到设定点 ±0.1℃；输出不越界。

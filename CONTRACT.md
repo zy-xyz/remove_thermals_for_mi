@@ -239,7 +239,11 @@ remove_thermals_for_mi/
   "charging": true
 }
 ```
-- `actual_current`：电池侧实测电流（A），只读展示；读不到为 `null`。旧版快照无此字段时按 `null` 处理，**不视为损坏**。
+- `applied_current`：控制器**命令**写进 `constant_charge_current` 的设定电流（A）；
+  `actual_current`：电池侧**实测**电流（A，即 `current_now`）。
+  两者通常不等：CV 阶段实际电流低于设定值。守护进程把实测电流喂进 ESO/预估器
+  （`step_with_meas`），避免观测器按从未发生的输入推算状态。
+- 读不到 `actual_current` 时为 `null`；旧版快照无此字段按 `null` 处理，**不视为损坏**。
 `status` 的字段名与此一致（`status` 是 `state.json` + 配置 + 行情的超集）。
 
 ## 6. history.csv（冻结）

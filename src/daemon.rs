@@ -93,6 +93,11 @@ pub fn run() -> i32 {
         let charging = dev.read_charging() == Some(Charging::Yes);
         let params = cfg_now.to_params();
         let meas = dev.read_temp();
+        // 电池侧实测电流：此刻读数反映**上一拍写入**的实际后果（CV 阶段会低于设定值）。
+        // 控制器必须用它推进 ESO/预估器，否则会按一个从未发生的输入推算状态。
+        // 读不到写 NaN → JSON `null`（前端画断点），喂控制器时按 0 保守处理。
+        let actual = dev.read_current_now();
+        let u_meas = actual.unwrap_or(0.0);
 
         let (phase, u, applied) = match (charging, meas) {
             (true, Some(y)) => {
@@ -104,7 +109,7 @@ pub fn run() -> i32 {
                         ctrl.insert(ImcAdrc::new(&params, y, u0, period))
                     }
                 };
-                let u = c.step(y, params.setpoint, period);
+                let u = c.step_with_meas(y, params.setpoint, period, u_meas);
                 // 阶段判定：仍在介入点以下且尚未被限流 → 监控态（满流）。
                 let ph = if y < params.intervention_temp() && u >= params.current_max - 1e-9 {
                     Phase::Monitoring
@@ -136,8 +141,7 @@ pub fn run() -> i32 {
             None => (meas.unwrap_or(0.0), 0.0, params.setpoint),
         };
 
-        // 电池侧实测电流（只读展示）。读不到写 NaN → JSON `null`，前端画断点。
-        let actual = dev.read_current_now().unwrap_or(f64::NAN);
+        let actual = actual.unwrap_or(f64::NAN);
 
         let snap = Snapshot {
             ts: now_ts(),
