@@ -108,6 +108,15 @@ bin/thermald
 webroot/index.html, app.js, style.css
 ```
 
+## 在线更新
+
+装好之后不用再手动推 zip：KernelSU 管理器会读 `module.prop` 的 `updateJson` 检查新版本，有新版本直接点更新即可。
+
+- 元数据 `update.json`（`version`/`versionCode`/`zipUrl`/`changelog`）由 `scripts/package.sh` 生成，随 Release 作为 asset 上传。
+- URL 走 `gh-proxy.com`：实测该设备**直连 `github.com` 不通**，只有代理可达。
+- 升级安装会保留 `/data/adb/modules/thermald/data/`（`config.json` 调参与覆盖开关），无需重新调参。
+- 注意：**已装的旧版（≤0.1.0）其 `module.prop` 里没有 `updateJson`，检查不到更新**，需手动装一次 0.1.1 及以后版本，此后才能收到在线更新提示。
+
 ## CLI 用法
 
 `thermald` 二进制，所有子命令**输出单行 JSON** 到 stdout，错误中文写 stderr、退出码见契约 §7。
@@ -128,7 +137,9 @@ thermald version
 
 ## WebUI
 
-`webroot/` 下纯静态 HTML/CSS/JS，**无 CDN、无外链、无构建**。通过 KernelSU 的 `ksu.exec("thermald status")` 调 CLI；无 `ksu` 全局对象（普通浏览器）时进入演示模式：顶部显示「未运行在 KernelSU 环境（演示模式）」，用内置样例数据画图。
+`webroot/` 下纯静态 HTML/CSS/JS，**无 CDN、无外链、无构建**。通过 KernelSU 调 CLI；无 `ksu` 全局对象（普通浏览器）时进入演示模式：顶部显示「未运行在 KernelSU 环境（演示模式）」，用内置样例数据画图。
+
+`ksu.exec` 走 root shell（`cwd=/`），裸命令不在 `PATH`（实测 `thermald` → exit 127），故面板用 `ksu.moduleInfo().moduleDir` 拼绝对路径调用；模块目录名未必等于 `module.prop` 的 `id`，因此不硬编码。
 
 - 轮询周期 ≤2s（可暂停）
 - 参数表单字段与契约 §3 表格一一对应（含单位、范围、中文标签）
@@ -185,7 +196,7 @@ build/thermald: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), static
 - **模型失配风险**。参数 `k/t/τ` 是标称值，不同电池/散热片/环境差异会带来失配。`src/legacy_baseline.rs` 提供旧模糊 PID 作为对照仪器，`src/control.rs` 的 25 项单元测试覆盖 50%/100% `τ` 失配场景。真机首次安装建议先用 `THERMALD_DRY_RUN=1` 或 `thermald sim --mismatch 1.5` 观察。
 - **纯滞后风险**。若标称 `tau` 与实际偏离过大，Smith 修正会失效，控制器退化到 IMC+ESO 但仍可用；不建议标称 `tau` 超过 60s。
 - **限幅是唯一的执行器约束**。若真机充电驱动拒绝接受 >18A（部分机型），需相应下调 `current_max`，否则观测器会看到 `applied_current < u_raw` 而产生 `z2` 残差。
-- **KernelSU 权限**。`sepolicy.rule` 允许读 `/sys/class/power_supply/battery/{temp,status,constant_charge_current}` 与写 `/data/adb/thermald/`。请勿在其它 KernelSU 分支复用而未复核 selinux 规则。
+- **KernelSU 权限**。`sepolicy.rule` 允许读 `/sys/class/power_supply/battery/{temp,status,constant_charge_current}` 与写 `/data/adb/modules/thermald/data/`。请勿在其它 KernelSU 分支复用而未复核 selinux 规则。
 - **免责**：本模块仅供技术爱好者在自有设备上试验。因使用本模块导致的高温、鼓包、起火、数据丢失，作者与分发者不承担任何责任。
 
 ## 目录布局

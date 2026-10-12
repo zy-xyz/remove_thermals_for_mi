@@ -4,7 +4,9 @@
 # 注意：本脚本以 post-fs-data 模式运行，必须快速返回。
 set -e
 
-DATA_DIR=${THERMALD_DIR:-/data/adb/thermald}
+MODDIR=${0%/*}
+# 数据目录：模块目录下 data/，随模块走（卸载即清）
+DATA_DIR=${THERMALD_DIR:-$MODDIR/data}
 
 # ── 杀残留守护进程（容错：进程不存在返回非 0，故加 || true）──
 # 先 TERM 给主循环机会复位充电电流，再 KILL 兜底
@@ -16,3 +18,5 @@ pkill -9 -f 'bin/thermald daemon' 2>/dev/null || true
 
 # ── 清数据目录：整个删掉，不留状态/配置/日志/CSV/锁文件 ──
 rm -rf "$DATA_DIR"
+# 0.1.0 及更早用固定路径，升级后可能残留，一并清
+[ "$DATA_DIR" = "/data/adb/thermald" ] || rm -rf /data/adb/thermald

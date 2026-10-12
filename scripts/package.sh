@@ -27,6 +27,27 @@ if [ "$VERSION" != "$CARGO_VERSION" ]; then
     die "版本不一致：module/module.prop version=${VERSION}，Cargo.toml version=${CARGO_VERSION}"
 fi
 
+# ── 在线更新元数据：module.prop 是版本单点，update.json 由它派生 ──
+# KernelSU 管理器拉 module.prop 的 updateJson → 读 {version,versionCode,zipUrl,changelog}，
+# 仅当 versionCode > 已装版本才提示更新（见 KSU ModuleRepositoryImpl.checkUpdate）。
+VERSION_CODE=$(sed -n 's/^versionCode=//p' "$PROP" | head -1)
+[ -n "$VERSION_CODE" ] || die "$PROP 中没有 versionCode="
+# module.prop 的 updateJson 同时充当「仓库 + 代理前缀」的单点：zipUrl 由它派生，
+# 换仓库或换代理只改 module.prop 一处。故这里强校验其完整形态。
+UPDATE_JSON=$(sed -n 's/^updateJson=//p' "$PROP" | head -1)
+[ -n "$UPDATE_JSON" ] || die "$PROP 中没有 updateJson="
+case "$UPDATE_JSON" in
+    */releases/latest/download/update.json) ;;
+    *) die "module.prop 的 updateJson 须形如 <前缀>/releases/latest/download/update.json（当前: ${UPDATE_JSON}）" ;;
+esac
+UPD_PREFIX="${UPDATE_JSON%/releases/latest/download/update.json}"
+
+# 资产下载地址用 tag 固定地址，而非 <前缀>/releases/latest/download/。
+# latest 会随新版本移动，与 update.json 被代理缓存的时间点可能错开，
+# 出现「update.json 已说 0.1.1、latest 已翻到 0.1.2」而下载到错版本的窗口。
+# tag 地址不可变（实测同样可达），保证更新检查拿到自洽的一对。
+ZIP_URL="$UPD_PREFIX/releases/download/v$VERSION/thermald-v$VERSION.zip"
+
 # ── 输入二进制：缺失则交给 scripts/build.sh ──
 if [ ! -f "$BIN" ]; then
     echo "- $BIN 不存在，调用 scripts/build.sh 构建"
@@ -64,3 +85,20 @@ rm -f "$OUT"
 
 rm -rf "$STAGE"
 echo "已生成 $OUT"
+
+# ── update.json：Release 资产，供 KSU 管理器在线更新 ──
+# 字段名以 KSU 源码 ModuleRepositoryImpl.checkUpdate 为准：
+#   version / versionCode / zipUrl / changelog（versionCode 非整数或 zipUrl 空则被忽略）
+# 作为 Release asset 单独上传，不进模块 zip（模块内不需要它）。
+UPDATE_JSON_OUT=$BUILD_DIR/update.json
+cat > "$UPDATE_JSON_OUT" <<JSON
+{
+  "version": "$VERSION",
+  "versionCode": $VERSION_CODE,
+  "zipUrl": "$ZIP_URL",
+  "changelog": "详见 https://github.com/zy-xyz/remove_thermals_for_mi/releases/tag/v$VERSION"
+}
+JSON
+python3 -c "import json,sys; json.load(open('$UPDATE_JSON_OUT'))" \
+    || die "生成的 $UPDATE_JSON_OUT 不是合法 JSON"
+echo "已生成 $UPDATE_JSON_OUT"

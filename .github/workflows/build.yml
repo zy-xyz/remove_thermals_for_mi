@@ -58,13 +58,18 @@ jobs:
             build/thermald
             build/thermald.sha256
             build/thermald-v*.zip
+            build/update.json
           if-no-files-found: error
 
       - name: GitHub Release on tag v*
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: build/thermald-v*.zip
+          # update.json 必须与 zip 同时上传：module.prop 的 updateJson 指向
+          # .../releases/latest/download/update.json，缺它则在线更新检查 404。
+          files: |
+            build/thermald-v*.zip
+            build/update.json
           generate_release_notes: true
-          # true：zip 没匹配上就让 Release 步骤失败，而不是静默发一个空 Release。
+          # true：文件没匹配上就让 Release 步骤失败，而不是静默发一个空 Release。
           fail_on_unmatched_files: true

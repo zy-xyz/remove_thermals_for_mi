@@ -14,9 +14,15 @@ command -v set_perm_recursive >/dev/null 2>&1 || set_perm_recursive() {
     find "$1" -type f -exec chmod "$5" {} + 2>/dev/null || true
 }
 
-MODDIR=${0%/*}
-# 数据目录：契约 §2 允许 THERMALD_DIR 覆盖（测试用），正式安装用默认值
-DATA_DIR=${THERMALD_DIR:-/data/adb/thermald}
+# 本脚本由 KernelSU 的 installer.sh **source** 执行（`. $MODPATH/customize.sh`），
+# 故 $0 指向外层脚本、不是本文件，`${0%/*}` 会取到错误路径。
+# MODPATH 由 installer.sh 以全局变量导出（= 模块实际安装目录），优先用它；
+# 脱离 KernelSU 环境（本机自测）时退回 ${0%/*}。
+MODDIR=${MODPATH:-${0%/*}}
+# 数据目录：模块目录下 data/，随模块走（卸载即清）。契约 §2 允许 THERMALD_DIR 覆盖（测试用）。
+# 安装期 MODDIR = /data/adb/modules_update/thermald，开机时被 rename 成
+# /data/adb/modules/thermald，故 $MODDIR/data 即最终数据目录。
+DATA_DIR=${THERMALD_DIR:-$MODDIR/data}
 
 # ── 架构校验：本模块只交叉编译了 aarch64 静态二进制 ──
 if [ "$ARCH" != "arm64" ]; then
@@ -46,6 +52,30 @@ fi
 ui_print "- 创建数据目录 $DATA_DIR"
 mkdir -p "$DATA_DIR"
 chmod 0700 "$DATA_DIR"
+
+# ── 升级安装：抢救上一版数据 ──
+# KernelSU 到下次开机才 rm -rf 旧模块目录，此刻旧目录仍在，故在此把用户
+# 调过的配置与覆盖开关搬进新模块目录，避免每次升级丢参数。
+# 两个历史来源都要看：
+#   0.1.0 及更早：固定路径 /data/adb/thermald
+#   0.1.1+     ：模块目录下 data/
+# 注意模块目录名未必等于 module.prop 的 id（实测机型上目录名是仓库名），
+# 故列出实际存在的候选目录，逐个找。
+# 旧路径可被 THERMALD_LEGACY_DIR 覆盖（测试用，同 THERMALD_DIR 约定）
+CANDIDATES="${THERMALD_LEGACY_DIR:-/data/adb/thermald}"
+for d in /data/adb/modules/*/data; do
+    [ -d "$d" ] || continue
+    CANDIDATES="$CANDIDATES $d"
+done
+for PREV_DIR in $CANDIDATES; do
+    [ "$PREV_DIR" = "$DATA_DIR" ] && continue
+    for f in config.json override_mi_thermald; do
+        if [ ! -f "$DATA_DIR/$f" ] && [ -f "$PREV_DIR/$f" ]; then
+            cp "$PREV_DIR/$f" "$DATA_DIR/$f" \
+                && ui_print "- 已从 $PREV_DIR 保留 $f"
+        fi
+    done
+done
 
 # 只首次安装落出厂配置；升级安装不得覆盖用户调过的参数
 if [ ! -f "$DATA_DIR/config.json" ]; then

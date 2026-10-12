@@ -15,6 +15,8 @@ use std::path::Path;
 pub(crate) enum Value {
     Num(f64),
     Str(String),
+    /// 仅由 `state.json` 的 `charging` 使用（契约 §5 冻结为 JSON 布尔）。
+    Bool(bool),
     Null,
 }
 
@@ -347,6 +349,12 @@ pub(crate) fn parse_flat(text: &str) -> Result<Vec<(String, Value)>, String> {
         } else if b[i..].starts_with(&['n', 'u', 'l', 'l']) {
             i += 4;
             Value::Null
+        } else if b[i..].starts_with(&['t', 'r', 'u', 'e']) {
+            i += 4;
+            Value::Bool(true)
+        } else if b[i..].starts_with(&['f', 'a', 'l', 's', 'e']) {
+            i += 5;
+            Value::Bool(false)
         } else if b[i] == '{' || b[i] == '[' {
             return Err(format!("字段 {key} 不支持嵌套的 JSON 对象/数组"));
         } else {

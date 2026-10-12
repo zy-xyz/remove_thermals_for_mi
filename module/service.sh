@@ -4,8 +4,9 @@ set -e
 
 MODDIR=${0%/*}
 BIN=$MODDIR/bin/thermald
-# 契约 §2：数据目录可用 THERMALD_DIR 覆盖（测试用）
-DATA_DIR=${THERMALD_DIR:-/data/adb/thermald}
+# 数据目录：模块目录下 data/，随模块走（卸载即清）
+# 契约 §2：可用 THERMALD_DIR 覆盖（测试用）
+DATA_DIR=${THERMALD_DIR:-$MODDIR/data}
 LOG=$DATA_DIR/thermald.log
 
 mkdir -p "$DATA_DIR"
@@ -23,10 +24,10 @@ OVERRIDE_PATH=$MODDIR/system/bin/mi_thermald
 
 if [ -f "$OVERRIDE_FLAG" ]; then
     mkdir -p "$MODDIR/system/bin"
-    cat > "$OVERRIDE_PATH" <<'SHIM'
+    cat > "$OVERRIDE_PATH" <<SHIM
 #!/system/bin/sh
 # 占位：使 MIUI 原厂 mi_thermald 调用变为空操作，控制权交给本模块守护进程。
-echo "$(date +%s) mi_thermald 调用已被本模块占位($*)" >> /data/adb/thermald/thermald.log
+echo "\$(date +%s) mi_thermald 调用已被本模块占位(\$*)" >> $DATA_DIR/thermald.log
 exit 0
 SHIM
     chmod 0755 "$OVERRIDE_PATH"
@@ -53,7 +54,11 @@ done
     set +e
     while true; do
         if [ -z "$(pgrep -f 'bin/thermald daemon' 2>/dev/null)" ]; then
-            nohup "$BIN" daemon >>"$LOG" 2>&1 &
+            # 必须把 DATA_DIR 显式传给守护进程：二进制内建的默认路径是
+            # /data/adb/modules/thermald/data，而模块目录名未必等于 module.prop
+            # 的 id（实测机型上目录名是仓库名 remove_thermals_for_mi），
+            # 不传就会写到不存在的路径。
+            THERMALD_DIR="$DATA_DIR" nohup "$BIN" daemon >>"$LOG" 2>&1 &
         fi
         sleep 30
     done

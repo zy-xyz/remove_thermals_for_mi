@@ -57,12 +57,15 @@ remove_thermals_for_mi/
 | 电池温度（0.1℃，整数） | `/sys/class/power_supply/battery/temp` |
 | 充电状态（字符串） | `/sys/class/power_supply/battery/status` |
 | 充电电流（µA，整数） | `/sys/class/power_supply/battery/constant_charge_current` |
-| 模块数据目录 | `/data/adb/thermald` |
-| 配置文件 | `/data/adb/thermald/config.json` |
-| 状态快照 | `/data/adb/thermald/state.json` |
-| 历史 CSV | `/data/adb/thermald/history.csv` |
-| 运行日志 | `/data/adb/thermald/thermald.log` |
-| 单实例锁 | `/data/adb/thermald/thermald.lock` |
+| 模块数据目录 | `/data/adb/modules/thermald/data` |
+| 配置文件 | `/data/adb/modules/thermald/data/config.json` |
+| 状态快照 | `/data/adb/modules/thermald/data/state.json` |
+| 历史 CSV | `/data/adb/modules/thermald/data/history.csv` |
+| 运行日志 | `/data/adb/modules/thermald/data/thermald.log` |
+| 单实例锁 | `/data/adb/modules/thermald/data/thermald.lock` |
+
+数据目录位于模块目录内，**随模块卸载一并清除**。升级安装时由 `customize.sh`
+从上一版目录抢救 `config.json` 与 `override_mi_thermald`（KernelSU 到下次开机才删旧目录）。
 
 数据目录路径可被环境变量 `THERMALD_DIR` 覆盖（**测试用，必须支持**）。
 
@@ -151,6 +154,7 @@ remove_thermals_for_mi/
   "observer_z2": -0.1205,
   "filtered_setpoint": 47.0,
   "applied_current": 20.76,
+  "actual_current": 19.52,
   "config": { "...同 config.json 全字段..." },
   "history_points": 512
 }
@@ -228,24 +232,27 @@ remove_thermals_for_mi/
   "current": 20.76,
   "target": 47.0,
   "applied_current": 20.76,
+  "actual_current": 19.52,
   "observer_z1": 46.80,
   "observer_z2": -0.1205,
   "filtered_setpoint": 47.0,
   "charging": true
 }
 ```
+- `actual_current`：电池侧实测电流（A），只读展示；读不到为 `null`。旧版快照无此字段时按 `null` 处理，**不视为损坏**。
 `status` 的字段名与此一致（`status` 是 `state.json` + 配置 + 行情的超集）。
 
 ## 6. history.csv（冻结）
 
 ```csv
-t,temp,current,target,state
-1791700000,46.83,20.76,47.0,controlling
+t,temp,current,target,actual,state
+1791700000,46.83,20.76,47.0,19.52,controlling
 ```
 - 表头固定，无空格。
 - 环形：行数（不含表头）超过 `csv_max_points` 时从**头部**淘汰。
 - `t` 单调递增。
-- `temp`/`current` 保留 3 位小数，`target` 1 位。
+- `temp`/`current`/`actual` 保留 3 位小数，`target` 1 位。
+- `actual` 读不到时写空字段（列位置保留）；旧版 5 列 CSV 仍可读入，`actual` 按缺失处理。
 
 ## 7. 退出码（冻结）
 
@@ -268,6 +275,7 @@ dry-run 下**绝不触碰任何 `/sys` 路径**。写电流只记录到内存，
 
 - 输入：`build/thermald`（aarch64 静态二进制，由 `scripts/build.sh` 产出）
 - 输出：`build/thermald-v<version>.zip`
+- 附加输出：`build/update.json`——KernelSU 在线更新元数据（字段 `version`/`versionCode`/`zipUrl`/`changelog`，对齐 KSU `ModuleRepositoryImpl.checkUpdate`）。作为 Release asset 与 zip 一同上传，**不进模块 zip**。
 - zip 顶层**直接**是 `module.prop`/`customize.sh`/`service.sh`/`post-fs-data.sh`/`uninstall.sh`/`sepolicy.rule`/`bin/thermald`/`webroot/*`，**无外层目录**。
 - `version` 从 `module/ module.prop` 单点读取；`Cargo.toml` 的 version 由 `scripts/build.sh` 校验一致（不一致则报错退出）。
 - `bin/thermald` 在 zip 内保留 0755。

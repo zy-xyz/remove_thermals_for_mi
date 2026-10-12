@@ -54,10 +54,21 @@ pub struct Snapshot {
     pub current: f64,
     pub target: f64,
     pub applied_current: f64,
+    /// 电池侧实测电流（A），只读展示用；读不到为 NaN（JSON 里是 `null`）。
+    pub actual_current: f64,
     pub z1: f64,
     pub z2: f64,
     pub filtered_setpoint: f64,
     pub charging: bool,
+}
+
+/// CSV 单元格数值：NaN 写成空字段（列位置仍保留，读回时按 NaN 处理）。
+fn csv_num(v: f64) -> String {
+    if v.is_finite() {
+        format!("{v:.3}")
+    } else {
+        String::new()
+    }
 }
 
 /// 时间戳（UNIX 秒）。系统时钟异常时回退 0，不 panic。
@@ -69,7 +80,7 @@ impl Snapshot {
     pub fn to_json(&self) -> String {
         format!(
             "{{\"ts\":{},\"uptime_s\":{},\"pid\":{},\"state\":\"{}\",\"temp\":{},\"current\":{},\
-             \"target\":{},\"applied_current\":{},\"observer_z1\":{},\"observer_z2\":{},\
+             \"target\":{},\"applied_current\":{},\"actual_current\":{},\"observer_z1\":{},\"observer_z2\":{},\
              \"filtered_setpoint\":{},\"charging\":{}}}",
             self.ts,
             self.uptime_s,
@@ -79,6 +90,7 @@ impl Snapshot {
             json_num(self.current),
             json_num(self.target),
             json_num(self.applied_current),
+            json_num(self.actual_current),
             json_num(self.z1),
             json_num(self.z2),
             json_num(self.filtered_setpoint),
@@ -107,10 +119,18 @@ impl Snapshot {
             current: num("current")?,
             target: num("target")?,
             applied_current: num("applied_current")?,
+            // 新增字段：旧版快照没有它，缺失不算损坏（否则整个快照被判死，
+            // `is_running` 返回 None → 面板假报「未运行」）。
+            actual_current: num("actual_current").unwrap_or(f64::NAN),
             z1: num("observer_z1")?,
             z2: num("observer_z2")?,
             filtered_setpoint: num("filtered_setpoint")?,
-            charging: matches!(get("charging")?, Value::Num(n) if n != 0.0),
+            charging: match get("charging")? {
+                Value::Bool(b) => b,
+                // 兼容旧版快照里的数字编码（0/1）。
+                Value::Num(n) => n != 0.0,
+                _ => return None,
+            },
         })
     }
 
@@ -129,19 +149,20 @@ impl Snapshot {
 /// 重写比就地截断简单且不会撕裂。
 pub struct History {
     cap: usize,
-    rows: RefCell<Vec<(u64, f64, f64, f64, Phase)>>,
+    rows: RefCell<Vec<(u64, f64, f64, f64, f64, Phase)>>,
     path: PathBuf,
 }
 
 impl History {
     /// 从磁盘载入已有历史（保留最近 `cap` 行）。
+    /// 兼容旧版 5 列 CSV（无实际电流列，`actual` 补 NaN）。
     pub fn load(dir: &Path, cap: usize) -> Self {
         let path = dir.join("history.csv");
         let mut rows = Vec::new();
         if let Ok(text) = fs::read_to_string(&path) {
             for line in text.lines().skip(1) {
                 let f: Vec<&str> = line.split(',').collect();
-                if f.len() != 5 {
+                if f.len() != 5 && f.len() != 6 {
                     continue;
                 }
                 let (Ok(t), Ok(temp), Ok(cur), Ok(tgt)) =
@@ -149,8 +170,10 @@ impl History {
                 else {
                     continue;
                 };
-                let Some(ph) = Phase::parse(f[4]) else { continue };
-                rows.push((t, temp, cur, tgt, ph));
+                let actual = f.get(4).filter(|_| f.len() == 6).and_then(|s| s.parse::<f64>().ok());
+                let state_col = if f.len() == 6 { f[5] } else { f[4] };
+                let Some(ph) = Phase::parse(state_col) else { continue };
+                rows.push((t, temp, cur, tgt, actual.unwrap_or(f64::NAN), ph));
             }
         }
         if rows.len() > cap {
@@ -160,12 +183,20 @@ impl History {
     }
 
     /// 追加一行；超过 `cap` 时从头部淘汰。返回是否落盘成功。
-    pub fn push(&self, ts: u64, temp: f64, current: f64, target: f64, phase: Phase) -> Result<(), String> {
+    pub fn push(
+        &self,
+        ts: u64,
+        temp: f64,
+        current: f64,
+        target: f64,
+        actual: f64,
+        phase: Phase,
+    ) -> Result<(), String> {
         {
             let mut r = self.rows.borrow_mut();
             // t 单调递增：同一秒内多次采样时 +1，避免 CSV 里出现非单调时间。
             let ts = r.last().map(|last| ts.max(last.0)).unwrap_or(ts);
-            r.push((ts, temp, current, target, phase));
+            r.push((ts, temp, current, target, actual, phase));
             if r.len() > self.cap {
                 let over = r.len() - self.cap;
                 r.drain(0..over);
@@ -177,9 +208,13 @@ impl History {
     /// 整体重写 CSV。
     pub fn flush(&self) -> Result<(), String> {
         let r = self.rows.borrow();
-        let mut s = String::from("t,temp,current,target,state\n");
-        for (t, temp, cur, tgt, ph) in r.iter() {
-            s.push_str(&format!("{t},{temp:.3},{cur:.3},{tgt:.1},{}\n", ph.as_str()));
+        let mut s = String::from("t,temp,current,target,actual,state\n");
+        for (t, temp, cur, tgt, actual, ph) in r.iter() {
+            s.push_str(&format!(
+                "{t},{temp:.3},{cur:.3},{tgt:.1},{},{}\n",
+                csv_num(*actual),
+                ph.as_str()
+            ));
         }
         atomic_write(&self.path, &s)
     }
@@ -197,7 +232,7 @@ impl History {
     }
 
     /// 取最近 `n` 行（`n=0` 表示全部）。
-    pub fn tail(&self, n: usize) -> Vec<(u64, f64, f64, f64, Phase)> {
+    pub fn tail(&self, n: usize) -> Vec<(u64, f64, f64, f64, f64, Phase)> {
         let r = self.rows.borrow();
         if n == 0 || n >= r.len() {
             r.clone()
@@ -206,19 +241,20 @@ impl History {
         }
     }
 
-    /// 序列化为 CLI 的 `history` JSON。
+    /// 序列化为 CLI 的 `history` JSON。`actual` 为 NaN 时写 `null`。
     pub fn to_json(&self, limit: usize) -> String {
         let pts = self.tail(limit);
         let mut s = format!("{{\"ok\":true,\"count\":{},\"points\":[", pts.len());
-        for (i, (t, temp, cur, tgt, ph)) in pts.iter().enumerate() {
+        for (i, (t, temp, cur, tgt, actual, ph)) in pts.iter().enumerate() {
             if i > 0 {
                 s.push(',');
             }
             s.push_str(&format!(
-                "{{\"t\":{t},\"temp\":{},\"current\":{},\"target\":{},\"state\":\"{}\"}}",
+                "{{\"t\":{t},\"temp\":{},\"current\":{},\"target\":{},\"actual\":{},\"state\":\"{}\"}}",
                 json_num(*temp),
                 json_num(*cur),
                 json_num(*tgt),
+                json_num(*actual),
                 ph.as_str()
             ));
         }
@@ -247,13 +283,18 @@ impl LockGuard {
                     return Ok(Some(Self { path }));
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // 陈旧锁检测：文件里的 PID 是否还活着。
-                    let alive = fs::read_to_string(&path)
-                        .ok()
-                        .and_then(|t| t.trim().parse::<i32>().ok())
-                        .map(pid_alive)
-                        .unwrap_or(false);
-                    if alive {
+                    // 陈旧锁检测：读锁文件里的 PID，看进程是否还活着。
+                    //
+                    // 空内容别立刻判死：`create_new` 与写入 PID 之间有窗口，并发启动时
+                    // 后来者若把空文件当陈旧锁抢走，就会出现两个守护进程同时写
+                    // `state.json.tmp`，rename 报 ENOENT。先等一下再读，仍为空才接管。
+                    let holder = |p: &Path| {
+                        fs::read_to_string(p).ok().and_then(|t| t.trim().parse::<i32>().ok())
+                    };
+                    if holder(&path).is_none() {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    }
+                    if holder(&path).map(pid_alive).unwrap_or(false) {
                         return Ok(None);
                     }
                     let _ = fs::remove_file(&path);
@@ -313,8 +354,71 @@ fn pid_alive(pid: i32) -> bool {
 }
 
 /// 数据目录：`THERMALD_DIR` 可覆盖（测试用）。
+///
+/// 未设置时从自身可执行文件位置反推：`<模块目录>/bin/thermald` → `<模块目录>/data`。
+/// 不硬编码模块目录名，因为 KernelSU 的模块目录名未必等于 module.prop 的 id
+/// （实测机型上目录名是仓库名，而 id 是 thermald）。
+/// 正常由 service.sh 显式传 THERMALD_DIR，此兜底只用于手工执行二进制的场景。
 pub fn data_dir() -> PathBuf {
-    std::env::var("THERMALD_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/data/adb/thermald"))
+    if let Ok(dir) = std::env::var("THERMALD_DIR") {
+        return PathBuf::from(dir);
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| exe.parent().map(|bin| bin.with_file_name("data")))
+        .unwrap_or_else(|| PathBuf::from("/data/adb/thermald"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn snap(charging: &str) -> String {
+        format!(
+            "{{\"ts\":1,\"uptime_s\":2,\"pid\":3,\"state\":\"idle\",\"temp\":35.6,\"current\":0,\
+             \"target\":47,\"applied_current\":0,\"observer_z1\":35.6,\"observer_z2\":0,\
+             \"filtered_setpoint\":47,\"charging\":{charging}}}"
+        )
+    }
+
+    /// 回归：守护进程写出的 `charging` 是 JSON 布尔，解析器必须认；
+    /// 曾因只认数字导致整份快照解析失败、`status` 恒报 `running:false`。
+    #[test]
+    fn snapshot_parses_json_bool_charging() {
+        assert!(!Snapshot::parse(&snap("false")).expect("false 应可解析").charging);
+        assert!(Snapshot::parse(&snap("true")).expect("true 应可解析").charging);
+    }
+
+    /// 回归：锁文件里是活着的 PID 时必须让位，绝不能抢锁。
+    /// 曾因空锁文件被误判为陈旧锁，导致两个守护进程并发写 state.json.tmp、rename 报 ENOENT。
+    #[test]
+    fn lock_defers_to_live_holder() {
+        let dir = std::env::temp_dir().join(format!("thermald-lk-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let lock = dir.join("thermald.lock");
+        // 自己就是活着的持有者
+        fs::write(&lock, format!("{}\n", std::process::id())).unwrap();
+        assert!(LockGuard::acquire(&dir).unwrap().is_none(), "活锁不该被抢");
+        assert!(lock.exists(), "不该删掉别人的锁");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 崩溃残留的空锁文件要能接管，否则守护进程再也起不来。
+    #[test]
+    fn lock_reclaims_empty_stale_file() {
+        let dir = std::env::temp_dir().join(format!("thermald-lk2-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("thermald.lock"), "").unwrap();
+        assert!(LockGuard::acquire(&dir).unwrap().is_some(), "空陈旧锁应被接管");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 旧版快照用数字编码，仍需兼容。
+    #[test]
+    fn snapshot_accepts_legacy_numeric_charging() {
+        assert!(!Snapshot::parse(&snap("0")).expect("0 应可解析").charging);
+        assert!(Snapshot::parse(&snap("1")).expect("1 应可解析").charging);
+    }
 }

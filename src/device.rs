@@ -30,6 +30,10 @@ impl Paths {
     pub fn current(&self) -> PathBuf {
         self.root.join("constant_charge_current")
     }
+    /// 电池真实电流节点（只读，µA）。
+    pub fn current_now(&self) -> PathBuf {
+        self.root.join("current_now")
+    }
 }
 
 /// 充电状态。
@@ -129,6 +133,20 @@ impl Device {
         Some(parse_status(raw.trim()))
     }
 
+    /// 读电池真实电流（A）。节点是无符号 µA：放电时也报正值，故取绝对值。
+    /// 读不到返回 `None`（调用方显示 `--`，不影响控制）。
+    pub fn read_current_now(&self) -> Option<f64> {
+        if self.dry {
+            let i = *self.cursor.borrow();
+            if self.script.is_empty() {
+                return None;
+            }
+            return Some(self.script[i.min(self.script.len() - 1)].2);
+        }
+        let raw = fs::read_to_string(self.paths.current_now()).ok()?;
+        raw.trim().parse::<f64>().ok().map(|ua| (ua / 1_000_000.0).abs())
+    }
+
     /// 写充电电流（A）。真实模式转成 µA 整数写 sysfs。
     pub fn write_current(&self, amps: f64) -> Result<(), String> {
         if self.dry {
@@ -136,8 +154,16 @@ impl Device {
             return Ok(());
         }
         let ua = (amps * 1_000_000.0).round() as i64;
-        fs::write(self.paths.current(), format!("{ua}\n"))
-            .map_err(|e| format!("写入电流失败 {}: {e}", self.paths.current().display()))
+        let path = self.paths.current();
+        // sysfs 属性默认 0444（且内核会复位），写前必须放开权限，否则必然 EACCES。
+        // 实测：Enforcing 与 Permissive 下 0444 均失败、0777 均成功 → 与 SELinux 无关。
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o777));
+        }
+        fs::write(&path, format!("{ua}\n"))
+            .map_err(|e| format!("写入电流失败 {}: {e}", path.display()))
     }
 
     /// 干跑模式下最近一次写入的电流。
@@ -171,5 +197,37 @@ pub fn parse_status(s: &str) -> Charging {
     match s.trim().to_ascii_lowercase().as_str() {
         "charging" | "full" => Charging::Yes,
         _ => Charging::No,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    /// 回归：sysfs 属性默认 0444，真实写入前必须先放开权限，否则必然 EACCES。
+    /// 曾漏掉这一步，设备日志出现 757 次 `写入电流失败 ... Permission denied`。
+    ///
+    /// 用临时目录模拟 sysfs 节点，不经 `THERMALD_DRY_RUN`，走真实 `fs::write` 分支。
+    #[test]
+    fn write_current_chmods_readonly_node() {
+        let dir = std::env::temp_dir().join(format!("thermald-wt-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+
+        let node = dir.join("constant_charge_current");
+        fs::write(&node, "0\n").unwrap();
+        // 复刻设备上的 0444：属主也不可写。
+        fs::set_permissions(&node, fs::Permissions::from_mode(0o444)).unwrap();
+        assert_eq!(fs::metadata(&node).unwrap().permissions().mode() & 0o200, 0);
+
+        std::env::remove_var("THERMALD_DRY_RUN");
+        let dev = Device::from_env_with_root(Paths { root: dir.clone() });
+        assert!(!dev.is_dry(), "不得走干跑分支，否则测不到真实写入");
+
+        dev.write_current(3.0).expect("0444 节点写入应成功（内部先 chmod 0777）");
+        assert_eq!(fs::read_to_string(&node).unwrap().trim(), "3000000");
+
+        let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -95,9 +95,9 @@ fn cmd_status() -> i32 {
         },
     };
 
-    let (z1, z2, rf) = match Snapshot::load(&dir) {
-        Some(s) if running_pid.is_some() => (s.z1, s.z2, s.filtered_setpoint),
-        _ => (f64::NAN, f64::NAN, params.setpoint),
+    let (z1, z2, rf, actual) = match Snapshot::load(&dir) {
+        Some(s) if running_pid.is_some() => (s.z1, s.z2, s.filtered_setpoint, s.actual_current),
+        _ => (f64::NAN, f64::NAN, params.setpoint, f64::NAN),
     };
 
     let j = format!(
@@ -105,7 +105,7 @@ fn cmd_status() -> i32 {
          \"temp\":{},\"current\":{},\"target\":{},\"intervention_temp\":{},\"overtemp_temp\":{},\
          \"setpoint\":{},\"hardware_limit\":{},\"charging\":{},\"state\":\"{}\",\
          \"observer_z1\":{},\"observer_z2\":{},\"filtered_setpoint\":{},\"applied_current\":{},\
-         \"config\":{},\"history_points\":{}}}",
+         \"actual_current\":{},\"config\":{},\"history_points\":{}}}",
         running_pid.is_some(),
         pid,
         uptime,
@@ -123,6 +123,7 @@ fn cmd_status() -> i32 {
         json_num(z2),
         json_num(rf),
         json_num_opt(current),
+        json_num(actual),
         cfg.to_json(),
         hist.len(),
     );

@@ -136,6 +136,9 @@ pub fn run() -> i32 {
             None => (meas.unwrap_or(0.0), 0.0, params.setpoint),
         };
 
+        // 电池侧实测电流（只读展示）。读不到写 NaN → JSON `null`，前端画断点。
+        let actual = dev.read_current_now().unwrap_or(f64::NAN);
+
         let snap = Snapshot {
             ts: now_ts(),
             uptime_s: started.elapsed().as_secs(),
@@ -145,6 +148,7 @@ pub fn run() -> i32 {
             current: applied,
             target: params.setpoint,
             applied_current: applied,
+            actual_current: actual,
             z1,
             z2,
             filtered_setpoint: rf,
@@ -154,7 +158,7 @@ pub fn run() -> i32 {
             eprintln!("thermald: 快照落盘失败: {e}");
         }
         if let Some(y) = meas {
-            if let Err(e) = hist.push(snap.ts, y, applied, params.setpoint, phase) {
+            if let Err(e) = hist.push(snap.ts, y, applied, params.setpoint, actual, phase) {
                 eprintln!("thermald: 历史落盘失败: {e}");
             }
         }
@@ -188,6 +192,7 @@ pub fn run() -> i32 {
         current: 0.0,
         target: cfg_now.setpoint,
         applied_current: 0.0,
+        actual_current: f64::NAN,
         z1: 0.0,
         z2: 0.0,
         filtered_setpoint: cfg_now.setpoint,

@@ -75,7 +75,7 @@ grep -q '仅支持 arm64' "$TMPROOT/x86.out" && grep -q 'x86_64' "$TMPROOT/x86.o
 mkdir -p "$TMPROOT/d2"
 mkdir -p module/bin
 if [ ! -f module/bin/thermald ]; then
-    printf '#!/bin/sh\n[ "$1" = set ] && echo "{\\"version\\":1}" > "${THERMALD_DIR:-/data/adb/thermald}/config.json"\nexit 0\n' > module/bin/thermald
+    printf '#!/bin/sh\n[ "$1" = set ] && echo "{\\"version\\":1}" > "${THERMALD_DIR:-/data/adb/modules/thermald/data}/config.json"\nexit 0\n' > module/bin/thermald
     chmod 0755 module/bin/thermald
     CREATED="$CREATED module/bin/thermald"
 fi
@@ -91,6 +91,40 @@ echo "  --- 输出 ---"; sed 's/^/  | /' "$TMPROOT/arm.out"
 echo '{"setpoint":46.5}' > "$TMPROOT/d2/config.json"
 ARCH=arm64 THERMALD_DIR="$TMPROOT/d2" sh module/customize.sh >/dev/null 2>&1
 grep -q '46.5' "$TMPROOT/d2/config.json" && ok "升级安装不覆盖用户已有配置" || bad "升级安装覆盖了用户配置"
+
+# ── 真机回归 ①：source 执行时 MODDIR 必须取自 MODPATH，而非 ${0%/*} ──
+# KernelSU 是 `. $MODPATH/customize.sh` 执行的，$0 指向外层脚本。
+# 曾因为用 ${0%/*} 导致 MODDIR 错、整个安装在真机上失败。本机自测用 sh 执行
+# 会掩盖此 bug，故必须显式模拟 source 场景。
+SRC="$TMPROOT/srcmod"; rm -rf "$SRC"; mkdir -p "$SRC/webroot"
+cp module/module.prop module/customize.sh module/service.sh module/post-fs-data.sh module/uninstall.sh "$SRC/"
+mkdir -p "$SRC/bin"; printf '#!/bin/sh\nexit 0\n' > "$SRC/bin/thermald"; chmod +x "$SRC/bin/thermald"
+# 用 sh -c '. 脚本' 模拟 KernelSU：$0 是 sh，MODPATH 是唯一正确来源
+if MODPATH="$SRC" ARCH=arm64 API=34 THERMALD_DIR="$TMPROOT/d3" sh -c '. "$1"' sh "$SRC/customize.sh" >"$TMPROOT/src.out" 2>&1; then
+    grep -q "0.1.1" "$TMPROOT/src.out" && ok "source 执行时 MODPATH 生效（读到 module.prop 版本）" \
+                                      || bad "source 执行时未读到 module.prop"
+    [ -d "$TMPROOT/d3" ] && ok "source 执行时数据目录按 THERMALD_DIR 创建" \
+                         || bad "source 执行时数据目录异常"
+else
+    bad "source 执行失败（MODDIR 取自 \${0%/*} 会导致此错）: $(cat "$TMPROOT/src.out")"
+fi
+# 未设 MODPATH 时应退回 ${0%/*}（本机直接 sh 执行场景仍须可用）
+ARCH=arm64 THERMALD_DIR="$TMPROOT/d4" sh module/customize.sh >/dev/null 2>&1 \
+    && ok "无 MODPATH 时退回 \${0%/*} 仍可安装" || bad "无 MODPATH 时安装失败"
+
+# ── 真机回归 ②：升级须从旧固定路径 /data/adb/thermald 抢救配置 ──
+# 0.1.0 的数据在 /data/adb/thermald，0.1.1 起改为模块目录下 data/。
+# 真机上模块目录名还会与 module.prop 的 id 不同，故用目录枚举而非拼 id。
+LEG="$TMPROOT/legacy"; rm -rf "$LEG"; mkdir -p "$LEG"
+echo '{"setpoint":45.5,"用户的调参":true}' > "$LEG/config.json"
+touch "$LEG/override_mi_thermald"
+echo '{"stale":1}' > "$LEG/state.json"
+ARCH=arm64 THERMALD_DIR="$TMPROOT/d5" THERMALD_LEGACY_DIR="$LEG" sh module/customize.sh >"$TMPROOT/mig.out" 2>&1
+grep -q '45.5' "$TMPROOT/d5/config.json" 2>/dev/null && ok "升级从旧固定路径抢救 config.json" \
+                                               || bad "未从旧固定路径抢救 config.json"
+[ -f "$TMPROOT/d5/override_mi_thermald" ] && ok "升级从旧固定路径抢救 override 开关" \
+                                          || bad "未抢救 override 开关"
+[ -f "$TMPROOT/d5/state.json" ] && bad "运行态 state.json 不该被迁移" || ok "运行态 state.json 正确未迁移"
 
 # ─────────────────────────────────────────────────────────
 head_ "小类1-③  换行符与语法检查"
@@ -110,6 +144,30 @@ for f in module/customize.sh module/service.sh module/post-fs-data.sh module/uni
     if sh -n "$f" 2>"$TMPROOT/syn.err"; then ok "sh -n $f 通过"; else bad "sh -n $f 失败: $(cat "$TMPROOT/syn.err")"; fi
 done
 bash -n scripts/package.sh && ok "bash -n scripts/package.sh 通过" || bad "bash -n scripts/package.sh 失败"
+
+# bash 3.2（macOS 自带）在 "$VAR 紧跟多字节字符" 时会吞掉展开并把该字符截成半个，
+# 产生非法 UTF-8 的错误信息（实测：echo "（$V）" 输出 "\xbc\x89"）。
+# 必须用 ${VAR} 花括号形式。此处静态扫描，防止回归。
+MBHIT=$(python3 - <<'PY'
+import re, pathlib
+pat = re.compile(r'\$([A-Za-z_][A-Za-z0-9_]*)(?=[^\x00-\x7f])')
+hits = []
+for p in sorted(pathlib.Path('.').rglob('*')):
+    if not p.is_file() or p.suffix not in ('.sh', '.yml', '.yaml'):
+        continue
+    if any(s in p.parts for s in ('.git', 'target', 'build')):
+        continue
+    for i, line in enumerate(p.read_text(encoding='utf-8').splitlines(), 1):
+        # 注释行不执行，跳过；否则下方说明里的示例写法会被误报
+        if line.lstrip().startswith('#'):
+            continue
+        if pat.search(line):
+            hits.append(f"{p}:{i}")
+print(",".join(hits))
+PY
+)
+[ -z "$MBHIT" ] && ok "无 '\$VAR 紧跟中文' 写法（bash 3.2 会产出非法 UTF-8）" \
+                || bad "存在会被 bash 3.2 截断的写法，请改用 \${VAR}: $MBHIT"
 
 # ─────────────────────────────────────────────────────────
 head_ "小类1-④  uninstall.sh 清数据目录 + 杀进程 + 容错（实测）"
@@ -291,9 +349,10 @@ PERM=$(ls -l "$TMPROOT/unz/bin/thermald" | awk '{print $1}')
 [ "$PERM" = "-rwxr-xr-x" ] && ok "解包后 bin/thermald 权限 0755 ($PERM)" || bad "bin/thermald 权限异常: $PERM"
 unzip -Z "$ZIP" 2>/dev/null | grep 'bin/thermald' | sed 's/^/  | /'
 
-# 版本不一致必须报错
+# 版本不一致必须报错（真实版本从 Cargo.toml 读，避免升版本后本测试失效）
 cp Cargo.toml "$TMPROOT/Cargo.toml.bak"
-sed -i '' 's/^version = "0.1.0"/version = "9.9.9"/' Cargo.toml
+REAL_VER=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+sed -i '' "s/^version = \"$REAL_VER\"/version = \"9.9.9\"/" Cargo.toml
 if bash scripts/package.sh >"$TMPROOT/mismatch.out" 2>&1; then
     bad "版本不一致未报错"
 else
@@ -302,7 +361,70 @@ else
                                                  || bad "报错信息不可读"
 fi
 cp "$TMPROOT/Cargo.toml.bak" Cargo.toml
-grep -q '0.1.0' Cargo.toml && ok "Cargo.toml 已还原" || bad "Cargo.toml 还原失败"
+grep -q "^version = \"$REAL_VER\"" Cargo.toml && ok "Cargo.toml 已还原 ($REAL_VER)" || bad "Cargo.toml 还原失败"
+
+# ─────────────────────────────────────────────────────────
+head_ "小类3-②  在线更新元数据 update.json（实测）"
+# 依据：KernelSU ModuleRepositoryImpl.checkUpdate 读 {version,versionCode,zipUrl,changelog}，
+# 且仅当 versionCode > 已装版本才提示更新。字段名写错 = 静默失效，故逐个断言。
+
+UJ=build/update.json
+[ -f "$UJ" ] && ok "产物存在: $UJ" || bad "产物不存在: $UJ"
+
+# 关键：KSU 读的是已安装模块里的 module.prop，zip 内那份必须带 updateJson
+unzip -p "$ZIP" module.prop > "$TMPROOT/zip.prop" 2>/dev/null
+ZIP_UJ=$(sed -n 's/^updateJson=//p' "$TMPROOT/zip.prop" | head -1)
+[ -n "$ZIP_UJ" ] && ok "zip 内 module.prop 带 updateJson，管理器能发现更新源" \
+                 || bad "zip 内 module.prop 缺 updateJson（管理器不会检查更新）"
+case "$ZIP_UJ" in
+    https://*/update.json) ok "updateJson 是 https 且以 /update.json 结尾" ;;
+    *) bad "updateJson 格式异常: '$ZIP_UJ'" ;;
+esac
+
+# 用 python3 解析，避免用正则去猜 JSON 结构
+UJ_OUT=$(python3 - "$UJ" "$PROP" <<'PY' 2>&1
+import json, re, sys
+uj, prop = sys.argv[1], sys.argv[2]
+u = json.load(open(uj))
+p = open(prop).read()
+g = lambda k: re.search(rf'^{k}=(.*)$', p, re.M).group(1).strip()
+errs = []
+# KSU 只认这四个键；缺 zipUrl 或 versionCode<=0 会被判为「无更新」
+for k in ("version", "versionCode", "zipUrl", "changelog"):
+    if k not in u:
+        errs.append(f"缺少字段 {k}")
+if u.get("version") != g("version"):
+    errs.append(f"version 不一致: {u.get('version')} vs {g('version')}")
+if u.get("versionCode") != int(g("versionCode")):
+    errs.append(f"versionCode 不一致: {u.get('versionCode')} vs {g('versionCode')}")
+if u.get("versionCode", 0) <= 0:
+    errs.append("versionCode <= 0，KSU 会忽略该更新")
+# zipUrl 必须指向本次版本的资产，否则检查到新版却下载到旧包
+if not str(u.get("zipUrl", "")).endswith(f"thermald-v{g('version')}.zip"):
+    errs.append(f"zipUrl 未指向本版本资产: {u.get('zipUrl')}")
+if not u.get("changelog"):
+    errs.append("changelog 为空")
+print("; ".join(errs) if errs else "ok")
+PY
+)
+if [ "$UJ_OUT" = "ok" ]; then
+    ok "update.json 字段名/版本/下载地址自洽（KSU schema）"
+else
+    bad "update.json 校验失败: $UJ_OUT"
+fi
+echo "  --- update.json ---"; sed 's/^/  | /' "$UJ"
+
+# 负向：module.prop 去掉 updateJson 时必须打包失败（否则发版会静默丢掉更新能力）
+cp "$PROP" "$TMPROOT/module.prop.bak"
+grep -v '^updateJson=' "$TMPROOT/module.prop.bak" > "$PROP"
+if bash scripts/package.sh >"$TMPROOT/nouj.out" 2>&1; then
+    bad "缺 updateJson 时未报错"
+else
+    ok "缺 updateJson 时退出码非 0"
+    grep -q 'updateJson' "$TMPROOT/nouj.out" && ok "报错信息指明 updateJson" || bad "报错信息未提及 updateJson"
+fi
+cp "$TMPROOT/module.prop.bak" "$PROP"
+grep -q '^updateJson=' "$PROP" && ok "module.prop 已还原" || bad "module.prop 还原失败"
 
 # ─────────────────────────────────────────────────────────
 echo

@@ -7,7 +7,8 @@
   var PAD = { l: 44, r: 44, t: 14, b: 24 };
   var STYLE = {
     temp: { line: '#ff7043', fill: 'rgba(255,112,67,0.13)' },
-    current: { line: '#4fc3f7', fill: 'rgba(79,195,247,0.13)' }
+    current: { line: '#4fc3f7', fill: 'rgba(79,195,247,0.13)' },
+    actual: { line: '#81c784', fill: 'rgba(129,199,132,0.10)' }
   };
   var STORE = 'mi_thermald_ui';
 
@@ -109,6 +110,8 @@
         if (p.temp > tmax) tmax = p.temp;
       }
       if (typeof p.current === 'number' && isFinite(p.current) && p.current > cmax) cmax = p.current;
+      // 实测电流也参与电流轴上界，否则这条线会越过画布顶。
+      if (typeof p.actual === 'number' && isFinite(p.actual) && p.actual > cmax) cmax = p.actual;
     });
     if (!isFinite(tmin) || !isFinite(tmax)) return null;
     tmin = Math.floor(tmin - 1);
@@ -130,10 +133,12 @@
   function mkSample(n) {
     var out = [], t0 = 1791700000;
     for (var i = 0; i < n; i++) {
+      var u = i < 40 ? 24 : 12 + 9 * Math.cos(i / 13);
       out.push({
         t: t0 + i,
         temp: 46.0 + 1.6 * Math.sin(i / 11),
-        current: i < 40 ? 24 : 12 + 9 * Math.cos(i / 13),
+        current: u,
+        actual: u * 0.94,          // 实测略低于设定，模拟线路损耗
         target: 47.0,
         state: i < 40 ? 'monitoring' : 'controlling'
       });
@@ -146,8 +151,20 @@
   var demo = !hasKsu;
   var demoCfg = null, demoPoints = null, demoUptime = 0;
 
+  // ksu.exec 走 root shell（cwd=/），裸命令不在 PATH：必须绝对路径。
+  // 模块目录名未必等于 module.prop 的 id，故用 KSU 提供的 moduleDir。
+  var BIN = 'thermald';
+  try {
+    if (hasKsu && typeof root.ksu.moduleInfo === 'function') {
+      var mi = root.ksu.moduleInfo();
+      if (typeof mi === 'string') mi = JSON.parse(mi);
+      if (mi && mi.moduleDir) BIN = mi.moduleDir + '/bin/thermald';
+    }
+  } catch (e) { /* 取不到就退回裸命令；演示模式下无妨 */ }
+  function withBin(cmd) { return String(cmd).replace(/^thermald\b/, BIN); }
+
   function exec(cmd) {
-    if (!demo) return Promise.resolve(root.ksu.exec(cmd)).then(normalizeExec);
+    if (!demo) return Promise.resolve(root.ksu.exec(withBin(cmd))).then(normalizeExec);
     return demoExec(cmd);
   }
   // KernelSU 不同版本可能 resolve 字符串 / {stdout} / {errno,stdout}
@@ -164,10 +181,12 @@
         }
         if (/^thermald\s+history\b/.test(cmd)) {
           if (!demoPoints) demoPoints = mkSample(120);
+          var uu = 12 + 9 * Math.cos(demoPoints.length / 13);
           demoPoints.push({
             t: demoPoints[demoPoints.length - 1].t + 1,
             temp: 46.0 + 1.6 * Math.sin(demoPoints.length / 11),
-            current: 12 + 9 * Math.cos(demoPoints.length / 13),
+            current: uu,
+            actual: uu * 0.94,
             target: 47.0, state: 'controlling'
           });
           if (demoPoints.length > 600) demoPoints.shift();
@@ -217,7 +236,8 @@
       overtemp_temp: cfg.setpoint + cfg.overtemp_delta, setpoint: cfg.setpoint,
       hardware_limit: cfg.hardware_limit, charging: true, state: 'controlling',
       observer_z1: t, observer_z2: -0.12, filtered_setpoint: cfg.setpoint,
-      applied_current: 20, config: cfg, history_points: demoPoints ? demoPoints.length : 0
+      applied_current: 20, actual_current: 18.8, config: cfg,
+      history_points: demoPoints ? demoPoints.length : 0
     });
   }
 
@@ -315,8 +335,9 @@
       ctx.beginPath(); ctx.moveTo(s.px, gy); ctx.lineTo(s.px + s.pw, gy); ctx.stroke(); ctx.restore();
     }
 
-    /* 折线 */
+    /* 折线：设定电流（细）→ 实测电流（细）→ 温度（主） */
     series(ctx, chartState.points, s, 'current', currentToY, STYLE.current);
+    series(ctx, chartState.points, s, 'actual', currentToY, STYLE.actual);
     series(ctx, chartState.points, s, 'temp', tempToY, STYLE.temp);
     if (el.chartMeta) {
       el.chartMeta.textContent = '点数 ' + chartState.points.length +

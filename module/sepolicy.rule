@@ -29,3 +29,10 @@ allow su sysfs_batteryinfo:dir { search read open getattr }
 allow su sysfs_batteryinfo:file { read write open getattr append }
 allow su ksu_file:file { read open getattr execute execute_no_trans map }
 allow su ksu_file:dir { search read open getattr }
+
+# ── 7. 模块数据目录读写：/data/adb/modules/thermald/data/ ──
+# 数据目录落在模块目录内（ksu_file 标签）。守护进程需在其中创建/写入/删除
+# state.json、history.csv、config.json、thermald.log 与锁文件。
+# 注意：原规则只给了 ksu_file 的读/执行权限，缺写权限会导致 ENFORCING 下写状态失败。
+allow ksu ksu_file:dir { add_name remove_name write create reparent }
+allow ksu ksu_file:file { create write append unlink rename setattr }

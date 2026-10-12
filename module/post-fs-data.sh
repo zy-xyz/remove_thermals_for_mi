@@ -3,7 +3,9 @@
 # 只做早期准备：把数据目录建好并收紧权限，让随后的 service.sh 与 CLI 都能直接用。
 set -e
 
-DATA_DIR=${THERMALD_DIR:-/data/adb/thermald}
+MODDIR=${0%/*}
+# 数据目录：模块目录下 data/，随模块走（卸载即清）
+DATA_DIR=${THERMALD_DIR:-$MODDIR/data}
 
 mkdir -p "$DATA_DIR"
 chown 0:0 "$DATA_DIR" 2>/dev/null || true

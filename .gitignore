@@ -3,3 +3,5 @@
 *.zip
 *.log
 .DS_Store
+/.toolchain
+/.ghcache

@@ -62,7 +62,7 @@ info "Rust target: $TARGET"
 SYSROOT=$(rustc --print sysroot 2>/dev/null) || die "无法获得 rustc sysroot"
 HOST_TRIPLE=$(rustc -vV 2>/dev/null | sed -n 's/^host: //p')
 LLD="$SYSROOT/lib/rustlib/$HOST_TRIPLE/bin/rust-lld"
-[ -x "$LLD" ] || die "找不到 rust-lld: $LLD（rust 组件 rust-std 未装全？）"
+[ -x "$LLD" ] || die "找不到 rust-lld: ${LLD}（rust 组件 rust-std 未装全？）"
 export DYLD_FALLBACK_LIBRARY_PATH="$SYSROOT/lib${DYLD_FALLBACK_LIBRARY_PATH:+:$DYLD_FALLBACK_LIBRARY_PATH}"
 
 # ── cargo build ──
