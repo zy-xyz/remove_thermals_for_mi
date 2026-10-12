@@ -112,7 +112,7 @@ cat > "$SAMPLE/check.cjs" <<'CHKEOF'
 const fs = require('fs');
 const REQ = ['ok','version','running','pid','uptime_s','ts','temp','current','target',
   'intervention_temp','overtemp_temp','setpoint','hardware_limit','charging','state',
-  'observer_z1','observer_z2','filtered_setpoint','applied_current','config','history_points'];
+  'observer_z1','observer_z2','filtered_setpoint','applied_current','actual_current','config','history_points'];
 const raw = fs.readFileSync(process.argv[2], 'utf8');
 let doc, bad = 0;
 try { doc = JSON.parse(raw); } catch (e) { console.log('FAIL  样例不是合法 JSON：' + e.message); process.exit(1); }
@@ -137,6 +137,7 @@ cat > "$SAMPLE/good.json" <<'JSONEOF'
 "temp":46.83,"current":20.76,"target":47.0,"intervention_temp":45.0,"overtemp_temp":47.3,
 "setpoint":47.0,"hardware_limit":48.0,"charging":true,"state":"controlling",
 "observer_z1":46.80,"observer_z2":-0.1205,"filtered_setpoint":47.0,"applied_current":20.76,
+"actual_current":18.92,
 "config":{"version":1,"setpoint":47.0,"hardware_limit":48.0},"history_points":512}
 JSONEOF
 
@@ -144,7 +145,7 @@ cat > "$SAMPLE/bad.json" <<'JSONEOF'
 {"ok":true,"version":"0.1.0","running":false,"pid":0,"uptime_s":0,"ts":0,"current":null,
 "target":47.0,"intervention_temp":45.0,"overtemp_temp":47.3,"setpoint":47.0,
 "charging":false,"state":"controlling","observer_z1":null,"observer_z2":null,
-"filtered_setpoint":47.0,"applied_current":null,"history_points":0}
+"filtered_setpoint":47.0,"applied_current":null,"actual_current":null,"history_points":0}
 JSONEOF
 
 if command -v node >/dev/null 2>&1; then

@@ -218,6 +218,20 @@ remove_thermals_for_mi/
 - `thermald version`：`{"ok": true, "version": "0.1.0"}`。
 - 无参数/未知子命令：打印用法到 stderr，退出码 2。
 
+### 4.9 实测锚定屋顶（A 组实现约束）
+
+写入 `constant_charge_current` 的是电流**上限**：上限高于电池实吸电流时该写入不产生后果
+（真机设定 24A、实吸 ~14A）。因此实际写入值不是裸的 ADRC 输出，而是：
+
+```
+u_written = min(u_adrc, roof)
+```
+
+`roof` 由 `control.rs::Anchor` 给出：温度 ≤ `intervention_temp` 时 `+∞`（不锚定）；超过
+介入点后以「进入锚定瞬间的实测电流 `u_ref`」为基准，随温度线性收紧，到 `hardware_limit`
+处归零。`u_ref` **捕获后冻结**，不得改用实时实测值——否则锚定线随实吸电流逐拍回落而自我
+塌陷。解除带 `ANCHOR_RELEASE_HYST`（默认 0.3℃，字面量集中在 `model.rs`）。
+
 ## 5. state.json（冻结）
 
 守护进程每 `sample_period` 秒原子写（写临时文件 + rename）：

@@ -7,8 +7,9 @@
 //! `hardware_limit` 以下。见 `CONTRACT.md` §0 与 `control.rs` 的说明。
 
 use crate::config::Config;
-use crate::control::ImcAdrc;
+use crate::control::{Anchor, ImcAdrc};
 use crate::device::{Charging, Device};
+use crate::model::ANCHOR_RELEASE_HYST;
 use crate::state::{data_dir, now_ts, History, LockGuard, Phase, Snapshot};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -68,6 +69,7 @@ pub fn run() -> i32 {
 
     // 电流初值：真实设备上无法可靠回读，取 0 起步（首步会按闭环立即给出正确的值）。
     let mut ctrl: Option<ImcAdrc> = None;
+    let mut anchor = Anchor::new();
     let mut cfg_now = cfg;
     let mut hist = History::load(&dir, cfg_now.csv_max_points as usize);
 
@@ -85,6 +87,8 @@ pub fn run() -> i32 {
                     // 参数变了就重建控制器：ESO/预估器都按旧参数标定，沿用会给出错的
                     // 扰动估计。代价是一次暂态，换来参数立即真实生效。
                     ctrl = None;
+                    // 介入点/硬件上限可能一起改了，旧的冻结基准不再有意义，重新捕获。
+                    anchor.reset();
                 }
                 hist = History::load(&dir, cfg_now.csv_max_points as usize);
             }
@@ -110,6 +114,19 @@ pub fn run() -> i32 {
                     }
                 };
                 let u = c.step_with_meas(y, params.setpoint, period, u_meas);
+                // 实测锚定屋顶：写入的是**上限**，写值高于电池实吸电流时空转。超温后把
+                // 写值压到「进入锚定那一刻的实测电流」以下，让限流立即真实生效（详见
+                // control.rs 的 Anchor）。不锚定时为 +∞，交还 ADRC 恢复满流。
+                let roof = anchor.limit(
+                    actual,
+                    y,
+                    params.intervention_temp(),
+                    params.hardware_limit,
+                    ANCHOR_RELEASE_HYST,
+                    params.current_min,
+                    params.current_max,
+                );
+                let u = u.min(roof);
                 // 阶段判定：仍在介入点以下且尚未被限流 → 监控态（满流）。
                 let ph = if y < params.intervention_temp() && u >= params.current_max - 1e-9 {
                     Phase::Monitoring
@@ -126,6 +143,7 @@ pub fn run() -> i32 {
                 if ctrl.is_some() {
                     ctrl = None;
                 }
+                anchor.reset();
                 if let Err(e) = dev.write_current(0.0) {
                     eprintln!("thermald: {e}");
                 }

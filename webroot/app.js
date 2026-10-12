@@ -246,7 +246,7 @@
     'ok', 'version', 'running', 'pid', 'uptime_s', 'ts', 'temp', 'current', 'target',
     'intervention_temp', 'overtemp_temp', 'setpoint', 'hardware_limit', 'charging',
     'state', 'observer_z1', 'observer_z2', 'filtered_setpoint', 'applied_current',
-    'config', 'history_points'
+    'actual_current', 'config', 'history_points'
   ];
   function checkStatus(d) {
     if (d.ok === false) throw new Error(d.error || '设备返回失败');
@@ -269,6 +269,8 @@
     el.tempSub.textContent = f.state_text;
     el.cur.textContent = f.current === null || f.current === undefined ? '--' : f.current.toFixed(2) + ' A';
     el.curSub.textContent = f.charging ? '充电中' : '未充电（不参与控制）';
+    el.act.textContent = f.actual === null || f.actual === undefined ? '--' : f.actual.toFixed(2) + ' A';
+    el.actSub.textContent = f.charging ? '充电中' : '未充电';
     el.target.textContent = f.target.toFixed(2) + ' ℃';
     el.targetSub.textContent = '介入 ' + f.intervention_temp.toFixed(1) + ' ℃ / 超温 ' + f.overtemp_temp.toFixed(1) + ' ℃';
     el.prot.textContent = p.text;
@@ -286,6 +288,7 @@
       running: d.running, pid: d.pid, uptime_s: d.uptime_s,
       temp: typeof d.temp === 'number' ? d.temp : null,
       current: typeof d.current === 'number' ? d.current : (typeof d.applied_current === 'number' ? d.applied_current : null),
+      actual: typeof d.actual_current === 'number' ? d.actual_current : null,
       target: num(c.setpoint, d.target), intervention_temp: num(d.intervention_temp, 0),
       overtemp_temp: num(d.overtemp_temp, 0),
       hardware_limit: num(c.hardware_limit, d.hardware_limit), charging: !!d.charging,
@@ -500,7 +503,7 @@
   function start() {
     el = {
       banner: $('banner'), temp: $('c-temp'), tempSub: $('c-temp-sub'), cur: $('c-cur'), curSub: $('c-cur-sub'),
-      target: $('c-target'), targetSub: $('c-target-sub'), prot: $('c-prot'), protSub: $('c-prot-sub'),
+      act: $('c-act'), actSub: $('c-act-sub'), target: $('c-target'), targetSub: $('c-target-sub'), prot: $('c-prot'), protSub: $('c-prot-sub'),
       uptime: $('c-uptime'), uptimeSub: $('c-uptime-sub'), chart: $('chart'), chartMsg: $('chart-msg'),
       chartMeta: $('chart-meta'), form: $('form-params'), formMsg: $('form-msg'), exportOut: $('export-out')
     };

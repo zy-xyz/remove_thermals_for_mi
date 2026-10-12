@@ -130,6 +130,13 @@ impl Default for Params {
     }
 }
 
+/// 实测锚定屋顶的解除滞环（℃）。
+///
+/// 温度回落到 `介入点 − 本值` 以下才交还 ADRC 恢复满流，避免在介入线上抖动
+/// （限流↔满流来回切换会比稳定限流更伤电池）。字面量集中在本文件，见
+/// `no_duplicate_threshold_literals_outside_model`。
+pub const ANCHOR_RELEASE_HYST: f64 = 0.3;
+
 impl Params {
     /// 介入温度：低于此温度直接给满流。
     pub fn intervention_temp(&self) -> f64 {

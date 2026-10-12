@@ -164,10 +164,87 @@ impl ImcAdrc {
     }
 }
 
+/// 实测锚定屋顶：把写入电流从「进入锚定瞬间的实测电流」按温度线性压到 0。
+///
+/// # 为什么需要它
+/// 写入 `constant_charge_current` 的是**上限**。写值高于电池实际吸入电流时空转——
+/// 真机 24A 设定下实测只有 ~14A，算法从 24A 慢慢往下磨时对真实电流零约束，等它磨到
+/// 实测以下已 47.8℃，此时系统自身在 48℃ 清零。锚定屋顶在**刚超介入点**就把写值压到
+/// 实测电流以下，让限流立即真实生效，并随温度线性收紧到硬件上限处归零。
+///
+/// ```text
+/// T ≤ T_int        → 不锚定（+∞），交还 ADRC 恢复满流
+/// T_int < T < T_hw → u_ref · (T_hw − T) / (T_hw − T_int)
+/// T ≥ T_hw         → 0
+/// ```
+///
+/// `T_int = setpoint − intervention_delta`（默认 45℃）、`T_hw = hardware_limit`（48℃）。
+///
+/// # 为什么冻结 `u_ref`
+/// 若锚定线用**实时**实测电流做基准，实测会随写入上限逐拍回落，锚定线跟着自我塌陷，
+/// 二三十拍就压到 0（棘轮效应）。冻结「进入锚定那一刻」的实测电流即可消除该正反馈。
+/// 解除带 0.3℃ 滞环防抖；释放后下次超温重新捕获。
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Anchor {
+    /// 本次锚定开始时冻结的实测电流（A）；`None` = 未锚定。
+    u_ref: Option<f64>,
+}
+
+impl Anchor {
+    /// 新建（未锚定）。
+    pub fn new() -> Self {
+        Self { u_ref: None }
+    }
+
+    /// 复位（停止充电、重建控制器时调用）。
+    pub fn reset(&mut self) {
+        self.u_ref = None;
+    }
+
+    /// 当前是否处于锚定态。
+    pub fn active(&self) -> bool {
+        self.u_ref.is_some()
+    }
+
+    /// 本拍的写入上限（A）；`+∞` 表示不锚定、交还 ADRC。
+    ///
+    /// `u_meas` 只在**捕获瞬间**被采纳：读不到（`None`）或读到 0 视为读数异常，
+    /// 用 `max` 兜底——宁可少限一点也不锁死充电。
+    #[allow(clippy::too_many_arguments)]
+    pub fn limit(
+        &mut self,
+        u_meas: Option<f64>,
+        temp: f64,
+        intervention: f64,
+        hw_limit: f64,
+        release_hyst: f64,
+        min: f64,
+        max: f64,
+    ) -> f64 {
+        // 解锁：**已锚定**且回落到滞环带以下才交还 ADRC。
+        if self.u_ref.is_some() && temp < intervention - release_hyst {
+            self.u_ref = None;
+        }
+        // 未锚定且未过介入点：不锚定。已锚定时即便温度略降到介入点下方也继续保持
+        // （滞环），否则会在介入线上限流↔满流来回抖动。
+        if self.u_ref.is_none() && temp <= intervention {
+            return f64::INFINITY;
+        }
+        let u_ref = *self.u_ref.get_or_insert_with(|| match u_meas {
+            Some(u) if u.is_finite() && u > 0.0 => u,
+            _ => max,
+        });
+        let span = (hw_limit - intervention).max(0.1);
+        let frac = ((hw_limit - temp) / span).clamp(0.0, 1.0);
+        (u_ref * frac).clamp(min, max)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::legacy_baseline::LegacyFuzzyPid;
+    use crate::model::ANCHOR_RELEASE_HYST;
     use crate::model::Sensor;
 
     /// 采样周期（s）：与旧守护进程 `sleep(1)` 一致。
@@ -1019,5 +1096,101 @@ mod tests {
         let frac = (prev - 25.0) / (50.0 - 25.0);
         eprintln!("[传感器 τ=8s] 5 步后到达比例={frac:.4}");
         assert!((0.4..0.55).contains(&frac), "5 步后应约到 46%，实测 {frac:.4}");
+    }
+
+    /// 锚定屋顶状态机：低于介入点不锚定（+∞）；超温后从**冻结**的实测电流线性压到
+    /// `hardware_limit` 处归零；最关键的——`u_ref` 一旦捕获就不再随实时读数漂移。
+    #[test]
+    fn suite_anchor_roof_binds_above_intervention() {
+        let p = Params::default();
+        let intv = p.intervention_temp(); // 45.0
+        let hw = p.hardware_limit; // 48.0
+        let hyst = ANCHOR_RELEASE_HYST;
+        let mut a = Anchor::new();
+
+        // 低于介入点：不锚定。
+        assert_eq!(a.limit(Some(14.0), 44.9, intv, hw, hyst, 0.0, 24.0), f64::INFINITY);
+        assert_eq!(a.limit(Some(14.0), 45.0, intv, hw, hyst, 0.0, 24.0), f64::INFINITY);
+        assert!(!a.active(), "介入点以下不应处于锚定态");
+
+        // 刚过介入点：捕获 u_ref=14，span=3℃，frac=(48−45.5)/3=0.8333 → 11.67A。
+        let u = a.limit(Some(14.0), 45.5, intv, hw, hyst, 0.0, 24.0);
+        assert!((u - 14.0 * (2.5 / 3.0)).abs() < 1e-9, "45.5℃ 锚定应到 11.67A，实测 {u}");
+        assert!(a.active());
+
+        // 关键：实时读数掉到 6A，锚定线**不动**（仍以冻结的 14 为基准）→ 11.67A。
+        let u2 = a.limit(Some(6.0), 45.5, intv, hw, hyst, 0.0, 24.0);
+        assert!((u2 - u).abs() < 1e-12, "u_ref 被实时读数带跑了：{u} → {u2}");
+
+        // 温度继续升 → 线性收紧；到 hw 归零；超过 hw 仍为 0（不反弹）。
+        assert!((a.limit(Some(6.0), 46.5, intv, hw, hyst, 0.0, 24.0) - 14.0 * (1.5 / 3.0)).abs() < 1e-9);
+        assert_eq!(a.limit(Some(6.0), hw, intv, hw, hyst, 0.0, 24.0), 0.0);
+        assert_eq!(a.limit(Some(6.0), 49.0, intv, hw, hyst, 0.0, 24.0), 0.0);
+
+        // 滞环内（温度低于介入点但高出解锁线）仍保持锚定：屋顶随温度回到满刻度，
+        // 已锁死的充电不会在介入线上立刻跳回 ADRC 重新打满。
+        let u_hold = a.limit(Some(6.0), 44.8, intv, hw, hyst, 0.0, 24.0);
+        assert!((u_hold - 14.0).abs() < 1e-9, "滞环内应保持锚定并给回 u_ref，实测 {u_hold}");
+        assert!(a.active(), "滞环内不应解锁");
+        // 落到解锁线之下：交还 ADRC。
+        let u_rel = a.limit(Some(6.0), 44.6, intv, hw, hyst, 0.0, 24.0);
+        assert_eq!(u_rel, f64::INFINITY);
+        assert!(!a.active());
+
+        // 重新超温：捕获**新**基准（此刻实测 20A），而非沿用旧的 14。
+        let u3 = a.limit(Some(20.0), 45.5, intv, hw, hyst, 0.0, 24.0);
+        assert!((u3 - 20.0 * (2.5 / 3.0)).abs() < 1e-9, "重捕获应取新实测，实测 {u3}");
+
+        // 读数异常（None / 0 / NaN）：用 max 兜底，宁可少限也不锁死充电。
+        let mut b = Anchor::new();
+        let ub = b.limit(None, 46.0, intv, hw, hyst, 0.0, 24.0);
+        assert!((ub - 24.0 * (2.0 / 3.0)).abs() < 1e-9, "无读数应退化为 max 基准，实测 {ub}");
+        let mut c = Anchor::new();
+        let uc = c.limit(Some(0.0), 46.0, intv, hw, hyst, 0.0, 24.0);
+        assert!(uc > 0.0, "实测 0 不应把充电锁死，实测 {uc}");
+        let mut d = Anchor::new();
+        let ud = d.limit(Some(f64::NAN), 46.0, intv, hw, hyst, 0.0, 24.0);
+        assert!(ud > 0.0, "NaN 读数不应把充电锁死，实测 {ud}");
+
+        // min/max 钳位仍生效。
+        let mut e = Anchor::new();
+        assert!((e.limit(Some(30.0), 45.5, intv, hw, hyst, 0.0, 24.0) - 24.0).abs() < 1e-9);
+        let mut f = Anchor::new();
+        assert!((f.limit(Some(1.0), 45.1, intv, hw, hyst, 3.0, 24.0) - 3.0).abs() < 1e-9);
+    }
+
+    /// 端到端：爆热场景下写入电流**必须**被锚定屋顶压住，且锚定线不自我塌陷。
+    ///
+    /// 模拟硬件天花板 14A（设定 24A 写下去只吸 14A），温度 45→47.5℃ 爬升。
+    /// 断言：每次超温后 u = min(u_adrc, anchor) ≤ anchor；且到 47.5℃ 时锚定线
+    /// 仍显著大于 0（若 u_ref 跟着实测塌陷，此处会趋近 0）。
+    #[test]
+    fn suite_anchor_roof_binds_written_current() {
+        let p = Params::default();
+        let intv = p.intervention_temp();
+        let hw = p.hardware_limit;
+        let mut ctrl = ImcAdrc::new(&p, intv, 0.0, DT);
+        let mut a = Anchor::new();
+        let mut last = 0.0;
+        for (i, k) in (0..26).enumerate() {
+            let t = 45.0 + k as f64 * 0.1;
+            let u_meas = 14.0;
+            let u_adrc = ctrl.step_with_meas(t, p.setpoint, DT, u_meas);
+            let anchor =
+                a.limit(Some(u_meas), t, intv, hw, ANCHOR_RELEASE_HYST, p.current_min, p.current_max);
+            let u_written = u_adrc.min(anchor);
+            assert!(
+                u_written <= anchor + 1e-9,
+                "第 {i} 步 t={t}℃ 写入 {u_written}A 越锚定线 {anchor}A"
+            );
+            last = anchor;
+        }
+        // t=47.5℃：frac=(48−47.5)/3=0.1667 → 14×0.1667 ≈ 2.33A，远未塌陷到 0。
+        assert!(last > 2.0, "锚定线塌陷了：47.5℃ 时仅 {last}A");
+
+        // 温度回到介入点以下：不锚定，允许满流恢复。
+        let a2 =
+            a.limit(Some(14.0), 44.0, intv, hw, ANCHOR_RELEASE_HYST, p.current_min, p.current_max);
+        assert_eq!(a2, f64::INFINITY);
     }
 }
