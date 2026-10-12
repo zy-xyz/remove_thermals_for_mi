@@ -1103,60 +1103,60 @@ mod tests {
     #[test]
     fn suite_anchor_roof_binds_above_intervention() {
         let p = Params::default();
-        let intv = p.intervention_temp(); // 45.0
+        let intv = p.intervention_temp(); // 46.0
         let hw = p.hardware_limit; // 48.0
         let hyst = ANCHOR_RELEASE_HYST;
         let mut a = Anchor::new();
 
         // 低于介入点：不锚定。
-        assert_eq!(a.limit(Some(14.0), 44.9, intv, hw, hyst, 0.0, 24.0), f64::INFINITY);
-        assert_eq!(a.limit(Some(14.0), 45.0, intv, hw, hyst, 0.0, 24.0), f64::INFINITY);
+        assert_eq!(a.limit(Some(14.0), 45.9, intv, hw, hyst, 0.0, 24.0), f64::INFINITY);
+        assert_eq!(a.limit(Some(14.0), 46.0, intv, hw, hyst, 0.0, 24.0), f64::INFINITY);
         assert!(!a.active(), "介入点以下不应处于锚定态");
 
-        // 刚过介入点：捕获 u_ref=14，span=3℃，frac=(48−45.5)/3=0.8333 → 11.67A。
-        let u = a.limit(Some(14.0), 45.5, intv, hw, hyst, 0.0, 24.0);
-        assert!((u - 14.0 * (2.5 / 3.0)).abs() < 1e-9, "45.5℃ 锚定应到 11.67A，实测 {u}");
+        // 刚过介入点：捕获 u_ref=14，span=2℃，frac=(48−46.5)/2=0.75 → 10.5A。
+        let u = a.limit(Some(14.0), 46.5, intv, hw, hyst, 0.0, 24.0);
+        assert!((u - 14.0 * (1.5 / 2.0)).abs() < 1e-9, "46.5℃ 锚定应到 10.5A，实测 {u}");
         assert!(a.active());
 
-        // 关键：实时读数掉到 6A，锚定线**不动**（仍以冻结的 14 为基准）→ 11.67A。
-        let u2 = a.limit(Some(6.0), 45.5, intv, hw, hyst, 0.0, 24.0);
+        // 关键：实时读数掉到 6A，锚定线**不动**（仍以冻结的 14 为基准）→ 10.5A。
+        let u2 = a.limit(Some(6.0), 46.5, intv, hw, hyst, 0.0, 24.0);
         assert!((u2 - u).abs() < 1e-12, "u_ref 被实时读数带跑了：{u} → {u2}");
 
         // 温度继续升 → 线性收紧；到 hw 归零；超过 hw 仍为 0（不反弹）。
-        assert!((a.limit(Some(6.0), 46.5, intv, hw, hyst, 0.0, 24.0) - 14.0 * (1.5 / 3.0)).abs() < 1e-9);
+        assert!((a.limit(Some(6.0), 47.5, intv, hw, hyst, 0.0, 24.0) - 14.0 * (0.5 / 2.0)).abs() < 1e-9);
         assert_eq!(a.limit(Some(6.0), hw, intv, hw, hyst, 0.0, 24.0), 0.0);
         assert_eq!(a.limit(Some(6.0), 49.0, intv, hw, hyst, 0.0, 24.0), 0.0);
 
         // 滞环内（温度低于介入点但高出解锁线）仍保持锚定：屋顶随温度回到满刻度，
-        // 已锁死的充电不会在介入线上立刻跳回 ADRC 重新打满。
-        let u_hold = a.limit(Some(6.0), 44.8, intv, hw, hyst, 0.0, 24.0);
+        // 已锁死的充电不会在介入线上立刻跳回 ADRC 重新打满。解锁线 = 46.0−0.3 = 45.7。
+        let u_hold = a.limit(Some(6.0), 45.8, intv, hw, hyst, 0.0, 24.0);
         assert!((u_hold - 14.0).abs() < 1e-9, "滞环内应保持锚定并给回 u_ref，实测 {u_hold}");
         assert!(a.active(), "滞环内不应解锁");
         // 落到解锁线之下：交还 ADRC。
-        let u_rel = a.limit(Some(6.0), 44.6, intv, hw, hyst, 0.0, 24.0);
+        let u_rel = a.limit(Some(6.0), 45.6, intv, hw, hyst, 0.0, 24.0);
         assert_eq!(u_rel, f64::INFINITY);
         assert!(!a.active());
 
         // 重新超温：捕获**新**基准（此刻实测 20A），而非沿用旧的 14。
-        let u3 = a.limit(Some(20.0), 45.5, intv, hw, hyst, 0.0, 24.0);
-        assert!((u3 - 20.0 * (2.5 / 3.0)).abs() < 1e-9, "重捕获应取新实测，实测 {u3}");
+        let u3 = a.limit(Some(20.0), 46.5, intv, hw, hyst, 0.0, 24.0);
+        assert!((u3 - 20.0 * (1.5 / 2.0)).abs() < 1e-9, "重捕获应取新实测，实测 {u3}");
 
         // 读数异常（None / 0 / NaN）：用 max 兜底，宁可少限也不锁死充电。
         let mut b = Anchor::new();
-        let ub = b.limit(None, 46.0, intv, hw, hyst, 0.0, 24.0);
-        assert!((ub - 24.0 * (2.0 / 3.0)).abs() < 1e-9, "无读数应退化为 max 基准，实测 {ub}");
+        let ub = b.limit(None, 46.5, intv, hw, hyst, 0.0, 24.0);
+        assert!((ub - 24.0 * (1.5 / 2.0)).abs() < 1e-9, "无读数应退化为 max 基准，实测 {ub}");
         let mut c = Anchor::new();
-        let uc = c.limit(Some(0.0), 46.0, intv, hw, hyst, 0.0, 24.0);
+        let uc = c.limit(Some(0.0), 46.5, intv, hw, hyst, 0.0, 24.0);
         assert!(uc > 0.0, "实测 0 不应把充电锁死，实测 {uc}");
         let mut d = Anchor::new();
-        let ud = d.limit(Some(f64::NAN), 46.0, intv, hw, hyst, 0.0, 24.0);
+        let ud = d.limit(Some(f64::NAN), 46.5, intv, hw, hyst, 0.0, 24.0);
         assert!(ud > 0.0, "NaN 读数不应把充电锁死，实测 {ud}");
 
-        // min/max 钳位仍生效。
+        // min/max 钳位仍生效。46.1℃：frac=(48−46.1)/2=0.95 → 30×0.95=28.5 → 24。
         let mut e = Anchor::new();
-        assert!((e.limit(Some(30.0), 45.5, intv, hw, hyst, 0.0, 24.0) - 24.0).abs() < 1e-9);
+        assert!((e.limit(Some(30.0), 46.1, intv, hw, hyst, 0.0, 24.0) - 24.0).abs() < 1e-9);
         let mut f = Anchor::new();
-        assert!((f.limit(Some(1.0), 45.1, intv, hw, hyst, 3.0, 24.0) - 3.0).abs() < 1e-9);
+        assert!((f.limit(Some(1.0), 46.1, intv, hw, hyst, 3.0, 24.0) - 3.0).abs() < 1e-9);
     }
 
     /// 端到端：爆热场景下写入电流**必须**被锚定屋顶压住，且锚定线不自我塌陷。
@@ -1185,7 +1185,7 @@ mod tests {
             );
             last = anchor;
         }
-        // t=47.5℃：frac=(48−47.5)/3=0.1667 → 14×0.1667 ≈ 2.33A，远未塌陷到 0。
+        // t=47.5℃：frac=(48−47.5)/2=0.25 → 14×0.25 = 3.5A，远未塌陷到 0。
         assert!(last > 2.0, "锚定线塌陷了：47.5℃ 时仅 {last}A");
 
         // 温度回到介入点以下：不锚定，允许满流恢复。

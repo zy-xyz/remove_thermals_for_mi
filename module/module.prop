@@ -1,7 +1,7 @@
 id=thermald
 name=thermald 充电温控
-version=0.1.1
-versionCode=101
+version=0.1.2
+versionCode=102
 author=zy
 description=小米/红米充电温控：IMC-ADRC 闭环限流把电池温度压在设定点（默认 47℃）。支持 WebUI 实时调参，配置热加载，停机自动清理充电电流。
 updateJson=https://gh-proxy.com/https://github.com/zy-xyz/remove_thermals_for_mi/releases/latest/download/update.json

@@ -111,12 +111,18 @@ impl Default for Params {
             b0: model.k / model.t,
         };
         Self {
-            // 工程起点：满流 24A 时开环稳态约 50.2℃，高于设定点 47.0℃ 与硬件上限 48℃，
+            // 工程起点：满流 24A 时开环稳态约 64.2℃，远高于设定点 47.0℃ 与硬件上限 48℃，
             // 因此必须闭环限流；τ=25s 对应实测「温度上升有延时」的量级。
+            //
+            // 真机校准（充电轨迹拟合）：ambient 是「无充电电流时电池的稳态温度」——
+            // 手机机身把电池维持在 40℃ 级（充电前 idle 40.6℃、冷却段拟合 42.1℃），
+            // 不是室温 20/25。设 39 留余量（冬天/低负载机身低一两度）。若设过低，
+            // 预测器/ESO 认为「温度不该这么高」，把差值当扰动 z2 放大 → 提前缩流、
+            // 平衡点远离目标（实测 45.4℃ vs 47℃ 的直接原因）。
             model,
-            ambient: 25.0,
+            ambient: 39.0,
             setpoint: 47.0,
-            intervention_gap: 2.0,
+            intervention_gap: 1.0,
             overtemp_margin: 0.3,
             // 充电驱动的硬保护线：设定点 47.0℃ 与它留 1℃ 余量，闭环把峰值压在 47.02℃
             // （40→47 起升实测），扰动 0.9℃ 时峰值 47.91℃，均不越线。
@@ -480,13 +486,13 @@ mod tests {
         );
     }
 
-    /// 验收②：默认参数下 25℃ 起步、满流 24A 的开环升温复现到 47℃ 量级，
+    /// 验收②：默认参数下环境温度 39℃ 起步、满流 24A 的开环升温复现到 47℃ 量级，
     /// 且 τ 秒之前温度一动不动（纯滞后）。
     #[test]
     fn default_params_reproduce_open_loop_warmup() {
         let p = Params::default();
         let mut plant = Plant::new(p.model, p.ambient, 0.0, 1.0);
-        assert!((plant.temp() - 25.0).abs() < 1e-9, "静止起步应为环境温度");
+        assert!((plant.temp() - 39.0).abs() < 1e-9, "静止起步应为环境温度");
 
         let dt = 1.0;
         let mut cross_47 = None;
@@ -501,14 +507,14 @@ mod tests {
 
         // 纯滞后：τ=25s，前 25 步温度必须严格等于起点。
         for (i, y) in trace.iter().take(25).enumerate() {
-            assert!((y - 25.0).abs() < 1e-12, "第 {} 步不应响应：{y}", i + 1);
+            assert!((y - 39.0).abs() < 1e-12, "第 {} 步不应响应：{y}", i + 1);
         }
-        assert!(trace[25] > 25.0, "τ 之后必须开始响应");
+        assert!(trace[25] > 39.0, "τ 之后必须开始响应");
 
         let t_cross = cross_47.expect("应穿越 47℃");
-        assert!((300.0..=600.0).contains(&t_cross), "穿越 47℃ 时刻 {t_cross}s 不在 5~10 分钟量级");
+        assert!((60.0..=240.0).contains(&t_cross), "穿越 47℃ 时刻 {t_cross}s 不在 1~4 分钟量级");
         let y_inf = plant.temp();
-        assert!((y_inf - 50.2).abs() < 0.1, "开环稳态 {y_inf}℃ 应高于设定点（说明必须闭环限流）");
+        assert!((y_inf - 64.2).abs() < 0.1, "开环稳态 {y_inf}℃ 应高于设定点（说明必须闭环限流）");
         assert!(y_inf > p.hardware_limit, "开环稳态必须越过硬件保护温度，闭环才有意义");
     }
 
@@ -516,15 +522,17 @@ mod tests {
     #[test]
     fn params_are_single_source_of_truth() {
         let p = Params::default();
-        // 设定点 47.0 → 介入 45.0、超温 47.3。与硬件线 48.0 各留 1℃ 与 0.7℃ 余量。
-        assert!((p.intervention_temp() - 45.0).abs() < 1e-9);
+        // 设定点 47.0 → 介入 46.0、超温 47.3。与硬件线 48.0 各留 2℃ 与 0.7℃ 余量
+        // （真机校准：介入点 45→46，把 45-46℃ 段留给 ADRC 满流逼近目标，平衡点从
+        // 45.4 上移到 ~46.6，见 README「实测锚定屋顶」节）。
+        assert!((p.intervention_temp() - 46.0).abs() < 1e-9);
         assert!((p.overtemp_temp() - 47.3).abs() < 1e-9);
         assert!((p.hardware_limit - 48.0).abs() < 1e-9);
         assert!((p.current_max - 24.0).abs() < 1e-9);
 
         let mut q = p;
         q.setpoint = 45.0;
-        assert!((q.intervention_temp() - 43.0).abs() < 1e-9, "介入点必须跟随设定点");
+        assert!((q.intervention_temp() - 44.0).abs() < 1e-9, "介入点必须跟随设定点");
         assert!((q.overtemp_temp() - 45.3).abs() < 1e-9, "超温点必须跟随设定点");
 
         let dt = 1.0;

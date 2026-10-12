@@ -101,7 +101,7 @@ cp module/module.prop module/customize.sh module/service.sh module/post-fs-data.
 mkdir -p "$SRC/bin"; printf '#!/bin/sh\nexit 0\n' > "$SRC/bin/thermald"; chmod +x "$SRC/bin/thermald"
 # 用 sh -c '. 脚本' 模拟 KernelSU：$0 是 sh，MODPATH 是唯一正确来源
 if MODPATH="$SRC" ARCH=arm64 API=34 THERMALD_DIR="$TMPROOT/d3" sh -c '. "$1"' sh "$SRC/customize.sh" >"$TMPROOT/src.out" 2>&1; then
-    grep -q "0.1.1" "$TMPROOT/src.out" && ok "source 执行时 MODPATH 生效（读到 module.prop 版本）" \
+    grep -q "0.1.2" "$TMPROOT/src.out" && ok "source 执行时 MODPATH 生效（读到 module.prop 版本）" \
                                       || bad "source 执行时未读到 module.prop"
     [ -d "$TMPROOT/d3" ] && ok "source 执行时数据目录按 THERMALD_DIR 创建" \
                          || bad "source 执行时数据目录异常"

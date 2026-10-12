@@ -84,7 +84,7 @@ G(s) = K · e^(-τs) / (T·s + 1)
 | `sensor_tau` | 温度传感器热耦合滞后（s） | 修正过度 | 修正不足 |
 | `sample_period` | 采样周期（s，守护进程） | 更省电、控制更粗 | 更精细但耗电 |
 
-**起步推荐**：默认值（`setpoint=47, intervention_delta=2.0, overtemp_delta=0.3, hardware_limit=48, current_max=24`）先跑一天，用 WebUI 看 `overshoot_pct` 与 `settle_steps`（`thermald sim` 输出），再微调 `λ`（0.5–2s）和 `wc`（`wo/10`~`wo/3`）。
+**起步推荐**：默认值（`setpoint=47, intervention_delta=1.0, overtemp_delta=0.3, hardware_limit=48, current_max=24`）先跑一天，用 WebUI 看 `overshoot_pct` 与 `settle_steps`（`thermald sim` 输出），再微调 `λ`（0.5–2s）和 `wc`（`wo/10`~`wo/3`）。
 
 ## 安装（KernelSU 模块）
 
