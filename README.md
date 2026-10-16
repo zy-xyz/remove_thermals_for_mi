@@ -198,6 +198,37 @@ build/thermald: ELF 64-bit LSB executable, ARM aarch64, version 1 (SYSV), static
 
 产物校验：`file build/thermald` 应显示 `ELF 64-bit LSB executable, ARM aarch64`；`readelf -l` 应**不含** `PT_INTERP`/`PT_DYNAMIC`（真静态）。当前产物已按此核对（aarch64 `e_type=EXEC`，segment 仅 `PHDR/LOAD/TLS/GNU_RELRO/GNU_EH_FRAME/GNU_STACK`）。
 
+## 故障排查
+
+**症状：`data/thermald.log` 疯长（可达数十 MB）、`service.sh` 进程持续吃 CPU，且 `thermald status` 报 `running:false`。**
+
+根因是**单实例锁的 PID 复用**。锁文件 `data/thermald.lock` 里存的是守护进程的 PID；
+进程退出后该 PID 会被内核回收给无关进程。旧版只判断 `/proc/<pid>` 是否存在，
+于是新守护启动时读到「进程还活着」→ 误判已有实例 → 立刻退出；
+`service.sh` 的 watchdog 随即再拉起一个，形成**永久重启循环**（实测 19 小时刷出 41MB / 59 万行日志、烧掉 2 小时 CPU）。
+
+修复（v0.1.3）：
+- `LockGuard` 增加身份校验——读 `/proc/<pid>/cmdline` 确认确实是 `thermald` 才让位，否则按陈旧锁接管；
+- `service.sh` 的 watchdog 改用同一个判据（弃用 `pgrep -f 'bin/thermald daemon'`，
+  该模式既依赖相对路径，又会被任意含该字样的命令行误命中，守护秒退时还永远命中不到）；
+- 日志超 1MB 自动轮转（就地截断保留最近 200 行，不换 inode），防止再次撑爆 `/data`。
+
+手查与恢复：
+
+```sh
+# 看是否陷入循环：日志行数是否远超 1MB/轮转上限
+wc -l /data/adb/modules/thermald/data/thermald.log
+
+# 看锁内容，并在 /proc 里核对它到底是谁
+cat  /data/adb/modules/thermald/data/thermald.lock
+tr '\0' ' ' < /proc/$(cat /data/adb/modules/thermald/data/thermald.lock)/cmdline
+
+# 恢复：清锁 + 重启服务
+rm -f /data/adb/modules/thermald/data/thermald.lock
+pkill -9 -f 'modules/thermald/service.sh'
+nohup sh /data/adb/modules/thermald/service.sh >/dev/null 2>&1 &
+```
+
 ## 风险与免责声明
 
 - **本模块不实施硬过温保护**。`hardware_limit`（默认 48℃）是**参考线**，不是断流开关。硬件过温保护由充电驱动（`thermal_engine` / `charge_early_halt`）负责；本控制器只负责用闭环（设定点 47℃、上限 48℃ 留 1℃ 余量）把温度压在此线以下。

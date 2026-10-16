@@ -8,6 +8,7 @@ BIN=$MODDIR/bin/thermald
 # 契约 §2：可用 THERMALD_DIR 覆盖（测试用）
 DATA_DIR=${THERMALD_DIR:-$MODDIR/data}
 LOG=$DATA_DIR/thermald.log
+LOCK=$DATA_DIR/thermald.lock
 
 mkdir -p "$DATA_DIR"
 chmod 0700 "$DATA_DIR"
@@ -43,23 +44,61 @@ until [ "$(getprop sys.boot_completed)" = "1" ]; do
     sleep 1
 done
 
+# ── 日志轮转 ──
+# 必须做：守护进程若陷入「启动即退出」循环，会把日志无限刷大
+# （实测一次故障刷出 41MB / 59 万行），最终撑爆 /data。
+# 就地截断（保持同一 inode），避免打断 watchdog 子 shell 已持有的 fd。
+LOG_MAX_BYTES=1048576
+rotate_log() {
+    [ -f "$LOG" ] || return 0
+    sz=$(wc -c < "$LOG" 2>/dev/null || echo 0)
+    [ "$sz" -gt "$LOG_MAX_BYTES" ] || return 0
+    tail -n 200 "$LOG" > "$LOG.tmp" 2>/dev/null &&
+        cat "$LOG.tmp" > "$LOG" 2>/dev/null
+    rm -f "$LOG.tmp" 2>/dev/null
+    echo "$(date +%s) service: 日志超限已轮转（保留最近 200 行）" >> "$LOG"
+    return 0
+}
+
 # ── 崩溃重启兜底（Watchdog）──
 # 理由：守护进程编译时 panic=abort，被 OOM killer 杀掉或异常退出后若不重启，
 # 手机会静默失去温控（充电电流留在最后一次写入值），故保留 30s 轮询兜底。
-# 用 pgrep 先判断，避免与「已有实例则退出 0」的单实例锁形成 5s 一次的忙重启循环。
+#
+# 判据不能用 `pgrep -f 'bin/thermald daemon'`：该模式既依赖相对路径（与 $BIN
+# 的实际绝对路径不一致），又会被任何命令行里含该字样的进程误命中，
+# 且守护进程「秒退」时它永远命中不到 —— 实测导致每 2~3 秒重生一次、
+# 19 小时刷出 59 万行日志并烧掉 2 小时 CPU。
+# 改为校验锁文件里的 PID 是否**确实是 thermald**（防 PID 复用），
+# 与 daemon 侧 LockGuard 的判据保持一致。
+#
 # 整个 watchdog 放进后台子 shell：守护进程的父进程是 watchdog，不是本脚本，
 # 本脚本退出后 watchdog 与守护进程均被 init 收养，不阻塞开机。
+daemon_alive() {
+    [ -f "$LOCK" ] || return 1
+    p=$(cat "$LOCK" 2>/dev/null)
+    # 锁内容必须是纯数字 PID
+    case "$p" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    [ -d "/proc/$p" ] || return 1
+    # 身份校验：PID 可能已被内核复用给无关进程，必须确认是 thermald。
+    tr '\0' ' ' < "/proc/$p/cmdline" 2>/dev/null | grep -q 'thermald' || return 1
+    return 0
+}
+
+rotate_log
 (
-    # 子 shell 内关闭 set -e：pkill/pgrep 未命中属正常情况
+    # 子 shell 内关闭 set -e：判据未命中属正常情况
     set +e
     while true; do
-        if [ -z "$(pgrep -f 'bin/thermald daemon' 2>/dev/null)" ]; then
+        if ! daemon_alive; then
             # 必须把 DATA_DIR 显式传给守护进程：二进制内建的默认路径是
             # /data/adb/modules/thermald/data，而模块目录名未必等于 module.prop
             # 的 id（实测机型上目录名是仓库名 remove_thermals_for_mi），
             # 不传就会写到不存在的路径。
             THERMALD_DIR="$DATA_DIR" nohup "$BIN" daemon >>"$LOG" 2>&1 &
         fi
+        rotate_log
         sleep 30
     done
 ) </dev/null >>"$LOG" 2>&1 &

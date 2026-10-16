@@ -294,7 +294,7 @@ impl LockGuard {
                     if holder(&path).is_none() {
                         std::thread::sleep(std::time::Duration::from_millis(50));
                     }
-                    if holder(&path).map(pid_alive).unwrap_or(false) {
+                    if holder(&path).map(holder_is_thermald).unwrap_or(false) {
                         return Ok(None);
                     }
                     let _ = fs::remove_file(&path);
@@ -350,6 +350,36 @@ fn pid_alive(pid: i32) -> bool {
             .status()
             .map(|s| s.success())
             .unwrap_or(false)
+    }
+}
+
+/// 判定锁文件里的 PID 是否**确实是本模块的守护进程**。
+///
+/// 只看 `/proc/<pid>` 存在会踩 PID 复用：锁文件写的是某个旧 PID，它退出后
+/// 被内核回收给无关进程（实测被 `.qtidataservices` 占用），新守护启动时读到
+/// 「进程还活着」就误判已有实例、立即退出；watchdog 于是每轮再拉起一次，
+/// 形成永久重启循环（实测 19 小时刷出 59 万行日志、烧掉 2 小时 CPU）。
+///
+/// 因此必须校验身份：读 `/proc/<pid>/cmdline`，确认命令行含 `thermald`。
+/// 读不到 cmdline（权限等）时保守判活，避免误抢真实例的锁。
+fn holder_is_thermald(pid: i32) -> bool {
+    if !pid_alive(pid) {
+        return false;
+    }
+    if pid == std::process::id() as i32 {
+        return true;
+    }
+    #[cfg(target_os = "linux")]
+    {
+        match fs::read(format!("/proc/{pid}/cmdline")) {
+            Ok(buf) => String::from_utf8_lossy(&buf).contains("thermald"),
+            // 拿不到 cmdline 就不抢锁——宁可让 watchdog 兜底，也不要双实例。
+            Err(_) => true,
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        true
     }
 }
 
@@ -420,5 +450,23 @@ mod tests {
     fn snapshot_accepts_legacy_numeric_charging() {
         assert!(!Snapshot::parse(&snap("0")).expect("0 应可解析").charging);
         assert!(Snapshot::parse(&snap("1")).expect("1 应可解析").charging);
+    }
+
+    /// 回归：锁文件里的 PID 被内核复用给无关进程时必须能接管。
+    /// 曾因只判 `/proc/<pid>` 存在，被 PID 复用永久死锁：
+    /// 守护起不来 → watchdog 反复拉起 → 19 小时刷 59 万行日志、烧 2 小时 CPU。
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn lock_reclaims_pid_reused_by_unrelated_process() {
+        let dir = std::env::temp_dir().join(format!("thermald-lk3-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        // PID 1 恒活，且其 cmdline 不含 thermald，模拟「PID 被复用」。
+        fs::write(dir.join("thermald.lock"), "1\n").unwrap();
+        assert!(
+            LockGuard::acquire(&dir).unwrap().is_some(),
+            "PID 被无关进程复用时，锁必须可接管"
+        );
+        let _ = fs::remove_dir_all(&dir);
     }
 }
